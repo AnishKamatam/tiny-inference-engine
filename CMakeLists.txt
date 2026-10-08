@@ -1,0 +1,46 @@
+cmake_minimum_required(VERSION 3.24)
+project(tie VERSION 0.1.0 LANGUAGES CXX)
+
+if(NOT (APPLE AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64"))
+  message(FATAL_ERROR "tie targets Apple Silicon macOS (arm64)")
+endif()
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
+endif()
+
+include(FetchContent)
+FetchContent_Declare(doctest URL https://github.com/doctest/doctest/archive/refs/tags/v2.4.12.tar.gz)
+FetchContent_Declare(json URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz)
+set(DOCTEST_NO_INSTALL ON)
+set(JSON_Install OFF)
+FetchContent_MakeAvailable(doctest json)
+
+set(TIE_WARNINGS -Wall -Wextra -Wpedantic -Wshadow)
+# apple-m1 is the baseline of every Apple Silicon Mac and enables the int8 dot-product instructions.
+set(TIE_ARCH -mcpu=apple-m1)
+
+add_library(tie_core STATIC
+  src/core/buffer.cpp
+  src/core/dtype.cpp
+  src/core/tensor.cpp
+)
+target_include_directories(tie_core PUBLIC src)
+target_compile_options(tie_core PRIVATE ${TIE_WARNINGS} ${TIE_ARCH})
+target_link_libraries(tie_core PUBLIC nlohmann_json::nlohmann_json)
+
+enable_testing()
+add_executable(tie_tests
+  tests/test_main.cpp
+  tests/core/test_dtype.cpp
+  tests/core/test_tensor.cpp
+)
+target_include_directories(tie_tests PRIVATE tests)
+target_compile_options(tie_tests PRIVATE ${TIE_WARNINGS} ${TIE_ARCH})
+target_compile_definitions(tie_tests PRIVATE TIE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_link_libraries(tie_tests PRIVATE tie_core doctest::doctest)
+add_test(NAME tie_tests COMMAND tie_tests)
