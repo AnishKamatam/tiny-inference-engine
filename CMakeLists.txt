@@ -31,6 +31,7 @@ add_library(tie_core STATIC
   src/core/thread_pool.cpp
   src/model/gguf.cpp
   src/model/mapped_file.cpp
+  src/model/safetensors.cpp
 )
 target_include_directories(tie_core PUBLIC src)
 target_compile_options(tie_core PRIVATE ${TIE_WARNINGS} ${TIE_ARCH})
@@ -43,6 +44,7 @@ add_executable(tie_tests
   tests/core/test_tensor.cpp
   tests/core/test_thread_pool.cpp
   tests/model/test_gguf.cpp
+  tests/model/test_safetensors.cpp
   tests/support/npy.cpp
   tests/support/test_data.cpp
   tests/support/test_npy.cpp
