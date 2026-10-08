@@ -38,6 +38,9 @@ add_executable(tie_tests
   tests/test_main.cpp
   tests/core/test_dtype.cpp
   tests/core/test_tensor.cpp
+  tests/support/npy.cpp
+  tests/support/test_data.cpp
+  tests/support/test_npy.cpp
 )
 target_include_directories(tie_tests PRIVATE tests)
 target_compile_options(tie_tests PRIVATE ${TIE_WARNINGS} ${TIE_ARCH})
