@@ -35,12 +35,13 @@ add_library(tie_core STATIC
   src/model/mapped_file.cpp
   src/model/safetensors.cpp
   src/tokenizer/pretokenize.cpp
+  src/tokenizer/tokenizer.cpp
   src/tokenizer/unicode.cpp
   src/tokenizer/unicode_tables.cpp
 )
 target_include_directories(tie_core PUBLIC src)
 target_compile_options(tie_core PRIVATE ${TIE_WARNINGS} ${TIE_ARCH})
-target_link_libraries(tie_core PUBLIC nlohmann_json::nlohmann_json)
+target_link_libraries(tie_core PUBLIC nlohmann_json::nlohmann_json "-framework CoreFoundation")
 
 enable_testing()
 add_executable(tie_tests
@@ -56,6 +57,7 @@ add_executable(tie_tests
   tests/support/test_data.cpp
   tests/support/test_npy.cpp
   tests/tokenizer/test_pretokenize.cpp
+  tests/tokenizer/test_tokenizer.cpp
 )
 target_include_directories(tie_tests PRIVATE tests)
 target_compile_options(tie_tests PRIVATE ${TIE_WARNINGS} ${TIE_ARCH})
