@@ -25,15 +25,18 @@ set(TIE_WARNINGS -Wall -Wextra -Wpedantic -Wshadow)
 set(TIE_ARCH -mcpu=apple-m1)
 
 add_library(tie_core STATIC
+  src/backend/cpu/cpu_backend.cpp
   src/core/buffer.cpp
   src/core/dtype.cpp
   src/core/tensor.cpp
   src/core/thread_pool.cpp
+  src/kernels/cpu/vec.cpp
   src/model/config.cpp
   src/model/gguf.cpp
   src/model/loader.cpp
   src/model/mapped_file.cpp
   src/model/safetensors.cpp
+  src/tokenizer/chat_template.cpp
   src/tokenizer/pretokenize.cpp
   src/tokenizer/tokenizer.cpp
   src/tokenizer/unicode.cpp
@@ -46,6 +49,7 @@ target_link_libraries(tie_core PUBLIC nlohmann_json::nlohmann_json "-framework C
 enable_testing()
 add_executable(tie_tests
   tests/test_main.cpp
+  tests/backend/test_cpu_ops.cpp
   tests/core/test_dtype.cpp
   tests/core/test_tensor.cpp
   tests/core/test_thread_pool.cpp
@@ -56,6 +60,7 @@ add_executable(tie_tests
   tests/support/npy.cpp
   tests/support/test_data.cpp
   tests/support/test_npy.cpp
+  tests/tokenizer/test_chat_template.cpp
   tests/tokenizer/test_pretokenize.cpp
   tests/tokenizer/test_tokenizer.cpp
 )
