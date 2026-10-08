@@ -29,7 +29,9 @@ add_library(tie_core STATIC
   src/core/dtype.cpp
   src/core/tensor.cpp
   src/core/thread_pool.cpp
+  src/model/config.cpp
   src/model/gguf.cpp
+  src/model/loader.cpp
   src/model/mapped_file.cpp
   src/model/safetensors.cpp
 )
@@ -43,7 +45,9 @@ add_executable(tie_tests
   tests/core/test_dtype.cpp
   tests/core/test_tensor.cpp
   tests/core/test_thread_pool.cpp
+  tests/model/test_config.cpp
   tests/model/test_gguf.cpp
+  tests/model/test_loader.cpp
   tests/model/test_safetensors.cpp
   tests/support/npy.cpp
   tests/support/test_data.cpp
