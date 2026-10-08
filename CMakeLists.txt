@@ -34,6 +34,9 @@ add_library(tie_core STATIC
   src/model/loader.cpp
   src/model/mapped_file.cpp
   src/model/safetensors.cpp
+  src/tokenizer/pretokenize.cpp
+  src/tokenizer/unicode.cpp
+  src/tokenizer/unicode_tables.cpp
 )
 target_include_directories(tie_core PUBLIC src)
 target_compile_options(tie_core PRIVATE ${TIE_WARNINGS} ${TIE_ARCH})
@@ -52,6 +55,7 @@ add_executable(tie_tests
   tests/support/npy.cpp
   tests/support/test_data.cpp
   tests/support/test_npy.cpp
+  tests/tokenizer/test_pretokenize.cpp
 )
 target_include_directories(tie_tests PRIVATE tests)
 target_compile_options(tie_tests PRIVATE ${TIE_WARNINGS} ${TIE_ARCH})
