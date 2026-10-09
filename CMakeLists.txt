@@ -99,6 +99,7 @@ add_executable(tie_tests
   tests/model/test_gguf.cpp
   tests/model/test_loader.cpp
   tests/model/test_qwen3_binding.cpp
+  tests/model/test_qwen3_forward.cpp
   tests/model/test_safetensors.cpp
   tests/support/npy.cpp
   tests/support/test_data.cpp
