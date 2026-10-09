@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstring>
 
+#include "backend/checks.h"
 #include "core/error.h"
 #include "kernels/cpu/q8_0.h"
 #include "kernels/cpu/vec.h"
@@ -14,14 +15,6 @@ namespace tie {
 namespace {
 
 constexpr int64_t kMinParallelWork = 1 << 15;
-
-void expect_dtype(const Tensor& t, DType dtype, const char* what) {
-  if (t.dtype() != dtype) fail<InvalidArgument>("{} must be {}, got {}", what, name(dtype), name(t.dtype()));
-}
-
-void expect_shape(const Tensor& t, const Shape& shape, const char* what) {
-  if (!(t.shape() == shape)) fail<InvalidArgument>("{} must be {}, got {}", what, shape.str(), t.shape().str());
-}
 
 }  // namespace
 

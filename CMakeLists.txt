@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 project(tie VERSION 0.1.0 LANGUAGES CXX)
+enable_language(OBJCXX)
 
 if(NOT (APPLE AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64"))
   message(FATAL_ERROR "tie targets Apple Silicon macOS (arm64)")
@@ -24,8 +25,26 @@ set(TIE_WARNINGS -Wall -Wextra -Wpedantic -Wshadow)
 # apple-m1 is the baseline of every Apple Silicon Mac and enables the int8 dot-product instructions.
 set(TIE_ARCH -mcpu=apple-m1)
 
+# Metal shaders are compiled at runtime from source embedded in the binary.
+# Order matters: headers first, then kernels.
+set(TIE_METAL_SOURCES
+  ${CMAKE_SOURCE_DIR}/src/kernels/metal/common.h
+  ${CMAKE_SOURCE_DIR}/src/kernels/metal/elementwise.metal
+)
+string(REPLACE ";" "|" TIE_METAL_SOURCES_ARG "${TIE_METAL_SOURCES}")
+set(TIE_METAL_EMBED ${CMAKE_BINARY_DIR}/generated/metal_source.cpp)
+add_custom_command(
+  OUTPUT ${TIE_METAL_EMBED}
+  COMMAND ${CMAKE_COMMAND} -DOUTPUT=${TIE_METAL_EMBED} -DSOURCES=${TIE_METAL_SOURCES_ARG}
+          -P ${CMAKE_SOURCE_DIR}/cmake/embed_metal.cmake
+  DEPENDS ${TIE_METAL_SOURCES} ${CMAKE_SOURCE_DIR}/cmake/embed_metal.cmake
+  COMMENT "Embedding Metal shader source"
+  VERBATIM)
+
 add_library(tie_core STATIC
   src/backend/cpu/cpu_backend.cpp
+  src/backend/metal/metal_backend.mm
+  ${TIE_METAL_EMBED}
   src/core/buffer.cpp
   src/core/dtype.cpp
   src/core/tensor.cpp
@@ -45,13 +64,17 @@ add_library(tie_core STATIC
 )
 target_include_directories(tie_core PUBLIC src)
 target_compile_options(tie_core PRIVATE ${TIE_WARNINGS} ${TIE_ARCH})
-target_link_libraries(tie_core PUBLIC nlohmann_json::nlohmann_json "-framework CoreFoundation")
+set_source_files_properties(src/backend/metal/metal_backend.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+# The generated file is one long string literal; -Woverlength-strings does not apply to it.
+set_source_files_properties(${TIE_METAL_EMBED} PROPERTIES COMPILE_OPTIONS "-w")
+target_link_libraries(tie_core PUBLIC nlohmann_json::nlohmann_json "-framework CoreFoundation" "-framework Metal" "-framework Foundation")
 
 enable_testing()
 add_executable(tie_tests
   tests/test_main.cpp
   tests/backend/test_cpu_ops.cpp
   tests/backend/test_matmul.cpp
+  tests/backend/test_metal_backend.cpp
   tests/core/test_dtype.cpp
   tests/core/test_tensor.cpp
   tests/core/test_thread_pool.cpp
