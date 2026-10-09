@@ -67,6 +67,7 @@ add_library(tie_core STATIC
   src/model/mapped_file.cpp
   src/model/qwen3.cpp
   src/model/safetensors.cpp
+  src/sampling/sampler.cpp
   src/tokenizer/chat_template.cpp
   src/tokenizer/pretokenize.cpp
   src/tokenizer/tokenizer.cpp
@@ -101,6 +102,7 @@ add_executable(tie_tests
   tests/model/test_qwen3_binding.cpp
   tests/model/test_qwen3_forward.cpp
   tests/model/test_safetensors.cpp
+  tests/sampling/test_sampler.cpp
   tests/support/npy.cpp
   tests/support/test_data.cpp
   tests/support/test_npy.cpp
