@@ -15,6 +15,9 @@ CacheGeometry check_kv_cache(const Tensor& k_cache, const Tensor& v_cache) {
   if (k_cache.dtype() != DType::F32 && k_cache.dtype() != DType::F16) {
     fail<InvalidArgument>("KV cache dtype {} unsupported", name(k_cache.dtype()));
   }
+  for (int i = 0; i < 4; ++i) {
+    if (k_cache.dim(i) <= 0) fail<InvalidArgument>("KV cache shape {} has an empty dimension", k_cache.shape().str());
+  }
   return {k_cache.dim(0), k_cache.dim(1), k_cache.dim(2), k_cache.dim(3)};
 }
 

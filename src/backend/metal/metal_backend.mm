@@ -7,14 +7,17 @@
 
 #include <algorithm>
 #include <array>
+#include <limits>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
+#include "backend/attention_checks.h"
 #include "backend/checks.h"
 #include "backend/rope.h"
 #include "core/error.h"
 #include "kernels/metal/ggml_args.h"
+#include "kernels/metal/tie_args.h"
 
 namespace tie {
 
@@ -506,15 +509,70 @@ void MetalBackend::silu_mul(const Tensor& gate, const Tensor& up, Tensor& out) {
   scope.finish();
 }
 
-void MetalBackend::kv_write(const Tensor&, const Tensor&, const Tensor&, Tensor&, Tensor&) {
-  OpScope scope(*impl_);
-  fail<UnsupportedError>("Metal kv_write lands in Task 17");
+static_assert(sizeof(tie_kv_write_args) == 16, "tie_kv_write_args must match the shader layout");
+static_assert(sizeof(tie_attention_args) == 28, "tie_attention_args must match the shader layout");
+
+namespace {
+
+// tie's attention kernels index with 32-bit ints.
+void expect_int32_elements(const Tensor& t, const char* what) {
+  if (t.numel() > std::numeric_limits<int32_t>::max()) {
+    fail<InvalidArgument>("Metal attention kernels use 32-bit offsets: {} {} has too many elements", what,
+                          t.shape().str());
+  }
 }
 
-void MetalBackend::paged_attention(const Tensor&, const Tensor&, const Tensor&, const AttentionMetadata&, int, float,
-                                   Tensor&) {
+}  // namespace
+
+void MetalBackend::kv_write(const Tensor& k, const Tensor& v, const Tensor& slot_mapping, Tensor& k_cache,
+                            Tensor& v_cache) {
   OpScope scope(*impl_);
-  fail<UnsupportedError>("Metal paged_attention lands in Task 17");
+  const CacheGeometry g = check_kv_cache(k_cache, v_cache);
+  check_kv_write(k, v, slot_mapping, g);
+  expect_int32_elements(k_cache, "KV cache");
+  expect_int32_elements(k, "kv_write keys");
+  const tie_kv_write_args args{static_cast<int32_t>(slot_mapping.numel()), static_cast<int32_t>(g.kv_heads),
+                               static_cast<int32_t>(g.head_dim), static_cast<int32_t>(g.block_size)};
+  impl_->bind_value(args, 0);
+  impl_->bind(k, 1);
+  impl_->bind(v, 2);
+  impl_->bind(slot_mapping, 3);
+  impl_->bind(k_cache, 4);
+  impl_->bind(v_cache, 5);
+  impl_->dispatch_threads(impl_->pipeline(k_cache.dtype() == DType::F16 ? "tie_kv_write_f16" : "tie_kv_write_f32"),
+                          static_cast<size_t>(k.numel()));
+  scope.finish();
+}
+
+void MetalBackend::paged_attention(const Tensor& q, const Tensor& k_cache, const Tensor& v_cache,
+                                   const AttentionMetadata& meta, int num_heads, float scale, Tensor& out) {
+  OpScope scope(*impl_);
+  const CacheGeometry g = check_kv_cache(k_cache, v_cache);
+  check_paged_attention(q, g, meta, num_heads, out);
+  expect_int32_elements(k_cache, "KV cache");
+  expect_int32_elements(q, "attention queries");
+  if (g.head_dim == 0 || g.head_dim % 32 != 0 || g.head_dim > 256) {
+    fail<InvalidArgument>("Metal attention needs head_dim a multiple of 32 up to 256, got {}", g.head_dim);
+  }
+  const tie_attention_args args{meta.num_seqs,
+                                num_heads,
+                                static_cast<int32_t>(g.kv_heads),
+                                static_cast<int32_t>(g.head_dim),
+                                static_cast<int32_t>(g.block_size),
+                                static_cast<int32_t>(meta.block_tables.cols()),
+                                scale};
+  impl_->bind_value(args, 0);
+  impl_->bind(q, 1);
+  impl_->bind(k_cache, 2);
+  impl_->bind(v_cache, 3);
+  impl_->bind(meta.query_start, 4);
+  impl_->bind(meta.context_lens, 5);
+  impl_->bind(meta.block_tables, 6);
+  impl_->bind(out, 7);
+  impl_->dispatch_groups(
+      impl_->pipeline(k_cache.dtype() == DType::F16 ? "tie_paged_attention_f16" : "tie_paged_attention_f32"),
+      MTLSizeMake(static_cast<NSUInteger>(num_heads), static_cast<NSUInteger>(q.rows()), 1), MTLSizeMake(32, 1, 1));
+  scope.finish();
 }
 
 }  // namespace tie

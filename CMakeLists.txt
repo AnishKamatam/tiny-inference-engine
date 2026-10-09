@@ -30,11 +30,13 @@ set(TIE_ARCH -mcpu=apple-m1)
 set(TIE_METAL_SOURCES
   ${CMAKE_SOURCE_DIR}/src/kernels/metal/common.h
   ${CMAKE_SOURCE_DIR}/src/kernels/metal/ggml_args.h
+  ${CMAKE_SOURCE_DIR}/src/kernels/metal/tie_args.h
   ${CMAKE_SOURCE_DIR}/src/kernels/metal/elementwise.metal
   ${CMAKE_SOURCE_DIR}/src/kernels/metal/rms_norm.metal
   ${CMAKE_SOURCE_DIR}/src/kernels/metal/rope.metal
   ${CMAKE_SOURCE_DIR}/src/kernels/metal/mul_mv.metal
   ${CMAKE_SOURCE_DIR}/src/kernels/metal/mul_mm.metal
+  ${CMAKE_SOURCE_DIR}/src/kernels/metal/attention.metal
 )
 string(REPLACE ";" "|" TIE_METAL_SOURCES_ARG "${TIE_METAL_SOURCES}")
 set(TIE_METAL_EMBED ${CMAKE_BINARY_DIR}/generated/metal_source.cpp)
@@ -83,6 +85,7 @@ add_executable(tie_tests
   tests/backend/test_cpu_ops.cpp
   tests/backend/test_paged_attention.cpp
   tests/backend/test_matmul.cpp
+  tests/backend/test_metal_attention.cpp
   tests/backend/test_metal_backend.cpp
   tests/backend/test_metal_matmul.cpp
   tests/backend/test_metal_ops.cpp
