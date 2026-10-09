@@ -65,6 +65,7 @@ add_library(tie_core STATIC
   src/model/gguf.cpp
   src/model/loader.cpp
   src/model/mapped_file.cpp
+  src/model/qwen3.cpp
   src/model/safetensors.cpp
   src/tokenizer/chat_template.cpp
   src/tokenizer/pretokenize.cpp
@@ -97,6 +98,7 @@ add_executable(tie_tests
   tests/model/test_config.cpp
   tests/model/test_gguf.cpp
   tests/model/test_loader.cpp
+  tests/model/test_qwen3_binding.cpp
   tests/model/test_safetensors.cpp
   tests/support/npy.cpp
   tests/support/test_data.cpp
