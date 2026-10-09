@@ -6,6 +6,7 @@
 
 #include "core/error.h"
 #include "core/half.h"
+#include "kernels/cpu/q8_0.h"
 
 namespace tie {
 
@@ -43,6 +44,9 @@ void to_f32(DType dtype, const void* src, float* dst, int64_t n) {
       for (; i < n; ++i) dst[i] = bf16_to_f32(s[i]);
       return;
     }
+    case DType::Q8_0:
+      dequantize_row_q8_0(static_cast<const BlockQ8_0*>(src), dst, n);
+      return;
     default:
       fail<InvalidArgument>("cannot convert {} to F32", name(dtype));
   }

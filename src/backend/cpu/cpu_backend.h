@@ -17,6 +17,7 @@ class CpuBackend final : public Backend {
   std::unique_ptr<Buffer> wrap(const void* data, size_t bytes) override;
 
   void embed(const Tensor& table, const Tensor& ids, Tensor& out) override;
+  void matmul(const Tensor& x, const Tensor& w, Tensor& out) override;
   void rms_norm(const Tensor& x, const Tensor& weight, float eps, Tensor& out) override;
   void rope_neox(Tensor& x, const Tensor& positions, int num_heads, int head_dim, float theta) override;
   void silu_mul(const Tensor& gate, const Tensor& up, Tensor& out) override;
@@ -27,6 +28,10 @@ class CpuBackend final : public Backend {
   // Runs fn over [0, n) on the pool when n * cost_per_item is large enough to
   // pay for waking the workers; otherwise inline on the calling thread.
   void parallel(int64_t n, int64_t cost_per_item, const ThreadPool::RangeFn& fn);
+
+  // Computes out[t * N + n] = dot(t, n) for all t < T, n < N, parallel over n.
+  template <typename RowDot>
+  void run_matmul(int64_t T, int64_t N, int64_t K, float* out, RowDot dot);
 
   ThreadPool pool_;
 };

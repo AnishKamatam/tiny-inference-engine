@@ -30,6 +30,8 @@ class Backend {
 
   // out[t] = table[ids[t]]. table [V, D] any weight dtype; ids I32 [T]; out [T, D].
   virtual void embed(const Tensor& table, const Tensor& ids, Tensor& out) = 0;
+  // out = x @ w^T. x [T, K] F32; w [N, K] any weight dtype; out [T, N] F32. No aliasing.
+  virtual void matmul(const Tensor& x, const Tensor& w, Tensor& out) = 0;
   // Row-wise RMSNorm with an F32 weight [D]. x, out [R, D]; out may alias x.
   virtual void rms_norm(const Tensor& x, const Tensor& weight, float eps, Tensor& out) = 0;
   // In-place NEOX (rotate-half) rotary embedding. x [T, num_heads * head_dim]; positions I32 [T].

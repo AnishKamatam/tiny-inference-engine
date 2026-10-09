@@ -1,10 +1,12 @@
 #include "backend/cpu/cpu_backend.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstring>
 
 #include "core/error.h"
+#include "kernels/cpu/q8_0.h"
 #include "kernels/cpu/vec.h"
 
 namespace tie {
@@ -43,8 +45,12 @@ void CpuBackend::parallel(int64_t n, int64_t cost_per_item, const ThreadPool::Ra
 void CpuBackend::embed(const Tensor& table, const Tensor& ids, Tensor& out) {
   expect_dtype(ids, DType::I32, "embed ids");
   // The allowed set must match what to_f32 supports.
-  if (table.dtype() != DType::F32 && table.dtype() != DType::F16 && table.dtype() != DType::BF16) {
-    fail<InvalidArgument>("embed table must be F32, F16 or BF16, got {}", tie::name(table.dtype()));
+  if (table.dtype() != DType::F32 && table.dtype() != DType::F16 && table.dtype() != DType::BF16 &&
+      table.dtype() != DType::Q8_0) {
+    fail<InvalidArgument>("embed table must be F32, F16, BF16 or Q8_0, got {}", tie::name(table.dtype()));
+  }
+  if (table.dtype() == DType::Q8_0 && table.cols() % kQ8_0BlockElems != 0) {
+    fail<InvalidArgument>("embed: Q8_0 table needs columns divisible by {}, got {}", kQ8_0BlockElems, table.cols());
   }
   expect_dtype(out, DType::F32, "embed output");
   const int64_t vocab = table.rows();
@@ -61,6 +67,69 @@ void CpuBackend::embed(const Tensor& table, const Tensor& ids, Tensor& out) {
       to_f32(table.dtype(), rows + static_cast<size_t>(id[t]) * table.row_bytes(), o + t * dim, dim);
     }
   });
+}
+
+template <typename RowDot>
+void CpuBackend::run_matmul(int64_t T, int64_t N, int64_t K, float* out, RowDot dot) {
+  // Weight rows are processed in small blocks so each activation row is reused
+  // from L1 across the block instead of being re-streamed for every weight row.
+  constexpr int64_t kRowBlock = 8;
+  parallel(N, T * K, [&](int64_t begin, int64_t end) {
+    for (int64_t n0 = begin; n0 < end; n0 += kRowBlock) {
+      const int64_t n1 = std::min(end, n0 + kRowBlock);
+      for (int64_t t = 0; t < T; ++t) {
+        for (int64_t n = n0; n < n1; ++n) out[t * N + n] = dot(t, n);
+      }
+    }
+  });
+}
+
+void CpuBackend::matmul(const Tensor& x, const Tensor& w, Tensor& out) {
+  expect_dtype(x, DType::F32, "matmul input");
+  expect_dtype(out, DType::F32, "matmul output");
+  // Validate everything up front: nothing may throw inside a pool worker.
+  const DType wd = w.dtype();
+  if (wd != DType::F32 && wd != DType::F16 && wd != DType::BF16 && wd != DType::Q8_0) {
+    fail<InvalidArgument>("matmul weight dtype {} unsupported", tie::name(wd));
+  }
+  const int64_t T = x.rows();
+  const int64_t K = x.cols();
+  const int64_t N = w.rows();
+  if (w.cols() != K) fail<InvalidArgument>("matmul: input {} does not match weight {}", x.shape().str(), w.shape().str());
+  if (wd == DType::Q8_0 && K % kQ8_0BlockElems != 0) {
+    fail<InvalidArgument>("matmul: Q8_0 weight needs K divisible by {}, got {}", kQ8_0BlockElems, K);
+  }
+  expect_shape(out, Shape{T, N}, "matmul output");
+
+  const float* xp = x.data<float>();
+  const auto* wp = static_cast<const char*>(w.raw());
+  const size_t wrow = w.row_bytes();
+  float* op = out.data<float>();
+
+  switch (wd) {
+    case DType::F32:
+      run_matmul(T, N, K, op, [&](int64_t t, int64_t n) {
+        return dot_f32(xp + t * K, reinterpret_cast<const float*>(wp + n * wrow), K);
+      });
+      return;
+    case DType::F16:
+      run_matmul(T, N, K, op, [&](int64_t t, int64_t n) {
+        return dot_f32_f16(xp + t * K, reinterpret_cast<const uint16_t*>(wp + n * wrow), K);
+      });
+      return;
+    case DType::BF16:
+      run_matmul(T, N, K, op, [&](int64_t t, int64_t n) {
+        return dot_f32_bf16(xp + t * K, reinterpret_cast<const uint16_t*>(wp + n * wrow), K);
+      });
+      return;
+    case DType::Q8_0:
+      run_matmul(T, N, K, op, [&](int64_t t, int64_t n) {
+        return dot_f32_q8_0(xp + t * K, reinterpret_cast<const BlockQ8_0*>(wp + n * wrow), K);
+      });
+      return;
+    default:
+      fail<InvalidArgument>("matmul weight dtype {} unsupported", tie::name(wd));
+  }
 }
 
 void CpuBackend::rms_norm(const Tensor& x, const Tensor& weight, float eps, Tensor& out) {

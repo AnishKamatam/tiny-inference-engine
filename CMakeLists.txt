@@ -30,6 +30,7 @@ add_library(tie_core STATIC
   src/core/dtype.cpp
   src/core/tensor.cpp
   src/core/thread_pool.cpp
+  src/kernels/cpu/q8_0.cpp
   src/kernels/cpu/vec.cpp
   src/model/config.cpp
   src/model/gguf.cpp
@@ -50,6 +51,7 @@ enable_testing()
 add_executable(tie_tests
   tests/test_main.cpp
   tests/backend/test_cpu_ops.cpp
+  tests/backend/test_matmul.cpp
   tests/core/test_dtype.cpp
   tests/core/test_tensor.cpp
   tests/core/test_thread_pool.cpp
