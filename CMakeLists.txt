@@ -47,6 +47,7 @@ add_custom_command(
   VERBATIM)
 
 add_library(tie_core STATIC
+  src/backend/attention_checks.cpp
   src/backend/cpu/cpu_backend.cpp
   src/backend/metal/metal_backend.mm
   ${TIE_METAL_EMBED}
@@ -80,6 +81,7 @@ enable_testing()
 add_executable(tie_tests
   tests/test_main.cpp
   tests/backend/test_cpu_ops.cpp
+  tests/backend/test_paged_attention.cpp
   tests/backend/test_matmul.cpp
   tests/backend/test_metal_backend.cpp
   tests/backend/test_metal_matmul.cpp

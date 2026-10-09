@@ -32,6 +32,10 @@ class MetalBackend final : public Backend {
   void silu_mul(const Tensor& gate, const Tensor& up, Tensor& out) override;
   void add(const Tensor& a, const Tensor& b, Tensor& out) override;
   void gather_rows(const Tensor& x, const Tensor& rows, Tensor& out) override;
+  void kv_write(const Tensor& k, const Tensor& v, const Tensor& slot_mapping, Tensor& k_cache,
+                Tensor& v_cache) override;
+  void paged_attention(const Tensor& q, const Tensor& k_cache, const Tensor& v_cache, const AttentionMetadata& meta,
+                       int num_heads, float scale, Tensor& out) override;
 
  private:
   struct Impl;

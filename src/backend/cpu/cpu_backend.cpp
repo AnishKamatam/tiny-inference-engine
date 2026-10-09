@@ -4,10 +4,13 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <limits>
 
+#include "backend/attention_checks.h"
 #include "backend/checks.h"
 #include "backend/rope.h"
 #include "core/error.h"
+#include "core/half.h"
 #include "kernels/cpu/q8_0.h"
 #include "kernels/cpu/vec.h"
 
@@ -16,6 +19,15 @@ namespace tie {
 namespace {
 
 constexpr int64_t kMinParallelWork = 1 << 15;
+
+void store(float* dst, const float* src, int64_t n) { std::memcpy(dst, src, static_cast<size_t>(n) * sizeof(float)); }
+void store(uint16_t* dst, const float* src, int64_t n) {
+  for (int64_t i = 0; i < n; ++i) dst[i] = f32_to_f16(src[i]);
+}
+float load(float v) { return v; }
+float load(uint16_t v) { return f16_to_f32(v); }
+float dot_key(const float* q, const float* k, int64_t n) { return dot_f32(q, k, n); }
+float dot_key(const float* q, const uint16_t* k, int64_t n) { return dot_f32_f16(q, k, n); }
 
 }  // namespace
 
@@ -217,6 +229,92 @@ void CpuBackend::gather_rows(const Tensor& x, const Tensor& rows, Tensor& out) {
   for (int64_t i = 0; i < rows.numel(); ++i) {
     if (r[i] < 0 || r[i] >= x.rows()) fail<InvalidArgument>("gather row {} outside [0, {})", r[i], x.rows());
     std::memcpy(out.data<float>() + i * x.cols(), x.data<float>() + r[i] * x.cols(), x.row_bytes());
+  }
+}
+
+void CpuBackend::kv_write(const Tensor& k, const Tensor& v, const Tensor& slot_mapping, Tensor& k_cache,
+                          Tensor& v_cache) {
+  const CacheGeometry g = check_kv_cache(k_cache, v_cache);
+  check_kv_write(k, v, slot_mapping, g);
+  const int64_t T = slot_mapping.numel();
+  const int64_t row = g.kv_heads * g.head_dim;
+  const int32_t* slots = slot_mapping.data<int32_t>();
+
+  const auto write = [&](auto* kc, auto* vc) {
+    for (int64_t t = 0; t < T; ++t) {
+      const int64_t block = slots[t] / g.block_size;
+      const int64_t offset = slots[t] % g.block_size;
+      for (int64_t h = 0; h < g.kv_heads; ++h) {
+        const int64_t dst = ((block * g.kv_heads + h) * g.block_size + offset) * g.head_dim;
+        store(kc + dst, k.data<float>() + t * row + h * g.head_dim, g.head_dim);
+        store(vc + dst, v.data<float>() + t * row + h * g.head_dim, g.head_dim);
+      }
+    }
+  };
+  if (k_cache.dtype() == DType::F16) {
+    write(k_cache.data<uint16_t>(), v_cache.data<uint16_t>());
+  } else {
+    write(k_cache.data<float>(), v_cache.data<float>());
+  }
+}
+
+void CpuBackend::paged_attention(const Tensor& q, const Tensor& k_cache, const Tensor& v_cache,
+                                 const AttentionMetadata& meta, int num_heads, float scale, Tensor& out) {
+  const CacheGeometry g = check_kv_cache(k_cache, v_cache);
+  const int64_t max_ctx = check_paged_attention(q, g, meta, num_heads, out);
+  const int64_t H = num_heads;
+  const int64_t D = g.head_dim;
+  const int64_t T = q.rows();
+  const int32_t* qs = meta.query_start.data<int32_t>();
+  const int32_t* ctx = meta.context_lens.data<int32_t>();
+  const int32_t* tables = meta.block_tables.data<int32_t>();
+  const int64_t max_blocks = meta.block_tables.cols();
+
+  token_seq_.resize(static_cast<size_t>(T));
+  for (int32_t s = 0; s < meta.num_seqs; ++s) {
+    for (int32_t t = qs[s]; t < qs[s + 1]; ++t) token_seq_[static_cast<size_t>(t)] = s;
+  }
+
+  const int64_t group = H / g.kv_heads;
+  const auto attend = [&](const auto* kc, const auto* vc) {
+    parallel(T * H, max_ctx * D, [&](int64_t begin, int64_t end) {
+      std::array<float, kMaxHeadDim> acc;
+      for (int64_t item = begin; item < end; ++item) {
+        const int64_t t = item / H;
+        const int64_t h = item % H;
+        const int32_t s = token_seq_[static_cast<size_t>(t)];
+        const int64_t pos = ctx[s] - (qs[s + 1] - qs[s]) + (t - qs[s]);
+        const int64_t kvh = h / group;
+        const int32_t* table = tables + s * max_blocks;
+        const float* qv = q.data<float>() + t * H * D + h * D;
+
+        // Online softmax: one pass over the keys, rescaling the running sum
+        // and accumulator whenever a new maximum score appears.
+        float m = -std::numeric_limits<float>::infinity();
+        float l = 0.0f;
+        std::fill_n(acc.begin(), D, 0.0f);
+        for (int64_t j = 0; j <= pos; ++j) {
+          const int64_t base = ((table[j / g.block_size] * g.kv_heads + kvh) * g.block_size + j % g.block_size) * D;
+          const float score = scale * dot_key(qv, kc + base, D);
+          if (score > m) {
+            const float correction = std::exp(m - score);
+            l *= correction;
+            for (int64_t d = 0; d < D; ++d) acc[static_cast<size_t>(d)] *= correction;
+            m = score;
+          }
+          const float p = std::exp(score - m);
+          l += p;
+          for (int64_t d = 0; d < D; ++d) acc[static_cast<size_t>(d)] += p * load(vc[base + d]);
+        }
+        float* o = out.data<float>() + t * H * D + h * D;
+        for (int64_t d = 0; d < D; ++d) o[d] = acc[static_cast<size_t>(d)] / l;
+      }
+    });
+  };
+  if (k_cache.dtype() == DType::F16) {
+    attend(k_cache.data<uint16_t>(), v_cache.data<uint16_t>());
+  } else {
+    attend(k_cache.data<float>(), v_cache.data<float>());
   }
 }
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string_view>
 
@@ -10,6 +11,18 @@
 namespace tie {
 
 inline constexpr int kMaxHeadDim = 512;
+
+// Attention layout of one step's flat, unpadded batch. Sequence s owns query
+// rows [query_start[s], query_start[s+1]). After this step's K/V writes its
+// cache holds context_lens[s] tokens, so its queries sit at the last positions
+// of that context and attend causally. The tensors may be larger than
+// num_seqs; only the first entries are read.
+struct AttentionMetadata {
+  int32_t num_seqs = 0;
+  Tensor query_start;   // I32 [num_seqs + 1]
+  Tensor context_lens;  // I32 [num_seqs]
+  Tensor block_tables;  // I32 [num_seqs, max_blocks_per_seq]
+};
 
 // The compute operations models are written against. Activations are F32 and
 // row-major; weight operands may be F32, F16, BF16 or Q8_0. An output may alias
@@ -42,6 +55,15 @@ class Backend {
   virtual void add(const Tensor& a, const Tensor& b, Tensor& out) = 0;
   // out[r] = x[rows[r]]. x [T, D]; rows I32 [R]; out [R, D].
   virtual void gather_rows(const Tensor& x, const Tensor& rows, Tensor& out) = 0;
+  // Writes token t's K and V heads to cache slot slot_mapping[t] (block * block_size + offset).
+  // k, v [T, kv_heads * head_dim] F32; caches [num_blocks, kv_heads, block_size, head_dim] F32 or F16.
+  virtual void kv_write(const Tensor& k, const Tensor& v, const Tensor& slot_mapping, Tensor& k_cache,
+                        Tensor& v_cache) = 0;
+  // Causal attention of every query row over its sequence's cached keys, read
+  // through the block table. Query head h reads KV head h / (num_heads / kv_heads),
+  // so grouped-query attention never duplicates K/V. q, out [T, num_heads * head_dim].
+  virtual void paged_attention(const Tensor& q, const Tensor& k_cache, const Tensor& v_cache,
+                               const AttentionMetadata& meta, int num_heads, float scale, Tensor& out) = 0;
 };
 
 }  // namespace tie

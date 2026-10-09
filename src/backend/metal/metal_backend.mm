@@ -506,4 +506,15 @@ void MetalBackend::silu_mul(const Tensor& gate, const Tensor& up, Tensor& out) {
   scope.finish();
 }
 
+void MetalBackend::kv_write(const Tensor&, const Tensor&, const Tensor&, Tensor&, Tensor&) {
+  OpScope scope(*impl_);
+  fail<UnsupportedError>("Metal kv_write lands in Task 17");
+}
+
+void MetalBackend::paged_attention(const Tensor&, const Tensor&, const Tensor&, const AttentionMetadata&, int, float,
+                                   Tensor&) {
+  OpScope scope(*impl_);
+  fail<UnsupportedError>("Metal paged_attention lands in Task 17");
+}
+
 }  // namespace tie
