@@ -6,6 +6,7 @@
 #include <cstring>
 
 #include "backend/checks.h"
+#include "backend/rope.h"
 #include "core/error.h"
 #include "kernels/cpu/q8_0.h"
 #include "kernels/cpu/vec.h"
@@ -156,9 +157,7 @@ void CpuBackend::rope_neox(Tensor& x, const Tensor& positions, int num_heads, in
   // Matches HF: inv_freq = 1 / theta^(2i/d) and angle = pos * inv_freq, all in F32.
   const int half = head_dim / 2;
   std::array<float, kMaxHeadDim / 2> inv_freq{};
-  for (int i = 0; i < half; ++i) {
-    inv_freq[static_cast<size_t>(i)] = 1.0f / std::pow(theta, static_cast<float>(2 * i) / static_cast<float>(head_dim));
-  }
+  rope_inv_freq(theta, head_dim, inv_freq.data());
   const int32_t* pos = positions.data<int32_t>();
   float* xp = x.data<float>();
   const int64_t row = static_cast<int64_t>(num_heads) * head_dim;

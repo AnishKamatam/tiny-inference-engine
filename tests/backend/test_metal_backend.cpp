@@ -145,7 +145,7 @@ TEST_CASE("a validation failure or stub throw inside a step discards the whole s
 
   metal.begin_step();
   metal.add(a.t, a.t, out.t);
-  CHECK_THROWS_AS(metal.silu_mul(a.t, a.t, out.t), UnsupportedError);
+  CHECK_THROWS_AS(metal.matmul(a.t, a.t, out.t), UnsupportedError);  // stub until Task 14, which must move this probe again
   CHECK_THROWS_AS(metal.end_step(), InvalidArgument);
   for (int i = 0; i < 4; ++i) CHECK(out.data<float>()[i] == -1.0f);
 

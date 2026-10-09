@@ -6,12 +6,15 @@
 #include <mach/vm_page_size.h>
 
 #include <algorithm>
+#include <array>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "backend/checks.h"
+#include "backend/rope.h"
 #include "core/error.h"
+#include "kernels/metal/ggml_args.h"
 
 namespace tie {
 
@@ -253,26 +256,167 @@ void MetalBackend::gather_rows(const Tensor& x, const Tensor& rows, Tensor& out)
   scope.finish();
 }
 
-// Ported kernels arrive in Tasks 13 (embed, rms_norm, rope_neox, silu_mul) and 14 (matmul).
-void MetalBackend::embed(const Tensor&, const Tensor&, Tensor&){
+void MetalBackend::embed(const Tensor& table, const Tensor& ids, Tensor& out) {
   OpScope scope(*impl_);
-  fail<UnsupportedError>("Metal embed lands in Task 13");
+  expect_dtype(ids, DType::I32, "embed ids");
+  // Same allow-list and checks as CpuBackend::embed.
+  const char* kernel = nullptr;
+  switch (table.dtype()) {
+    case DType::F32: kernel = "kernel_get_rows_f32"; break;
+    case DType::F16: kernel = "kernel_get_rows_f16"; break;
+    case DType::BF16: kernel = "kernel_get_rows_bf16"; break;
+    case DType::Q8_0: kernel = "kernel_get_rows_q8_0"; break;
+    default: fail<InvalidArgument>("embed table must be F32, F16, BF16 or Q8_0, got {}", tie::name(table.dtype()));
+  }
+  const bool quantized = table.dtype() == DType::Q8_0;
+  if (quantized && table.cols() % kQ8_0BlockElems != 0) {
+    fail<InvalidArgument>("embed: Q8_0 table needs columns divisible by {}, got {}", kQ8_0BlockElems, table.cols());
+  }
+  expect_dtype(out, DType::F32, "embed output");
+  const int64_t vocab = table.rows();
+  const int64_t dim = table.cols();
+  expect_shape(out, Shape{ids.numel(), dim}, "embed output");
+  const int32_t* tokens = ids.data<int32_t>();  // unified memory: ids are checked on the host
+  for (int64_t t = 0; t < ids.numel(); ++t) {
+    if (tokens[t] < 0 || tokens[t] >= vocab) {
+      fail<InvalidArgument>("token id {} outside vocabulary of {}", tokens[t], vocab);
+    }
+  }
+
+  // ggml view: src0 = table [ne00 = dim, ne01 = vocab], src1 = ids [ne10 = n], dst [ne0 = dim, ne1 = n].
+  ggml_metal_kargs_get_rows args{};
+  args.ne00t = static_cast<int32_t>(quantized ? dim / 16 : dim);  // the Q8_0 kernel writes a float4x4 per thread
+  args.ne00 = static_cast<int32_t>(dim);
+  args.nb01 = table.row_bytes();
+  args.nb02 = args.nb03 = table.nbytes();
+  args.ne10 = static_cast<int32_t>(ids.numel());
+  args.nb10 = sizeof(int32_t);
+  args.nb11 = args.nb12 = static_cast<uint64_t>(ids.numel()) * sizeof(int32_t);
+  args.nb1 = out.row_bytes();
+  args.nb2 = args.nb3 = out.nbytes();
+
+  if (out.numel() > 0) {
+    id<MTLComputePipelineState> pso = impl_->pipeline(kernel);
+    const NSUInteger threads = std::min<NSUInteger>(static_cast<NSUInteger>(args.ne00t), pso.maxTotalThreadsPerThreadgroup);
+    const NSUInteger groups_per_row = (static_cast<NSUInteger>(args.ne00t) + threads - 1) / threads;
+    impl_->bind_value(args, 0);
+    impl_->bind(table, 1);
+    impl_->bind(ids, 2);
+    impl_->bind(out, 3);
+    impl_->dispatch_groups(pso, MTLSizeMake(groups_per_row * static_cast<NSUInteger>(ids.numel()), 1, 1),
+                           MTLSizeMake(threads, 1, 1));
+  }
+  scope.finish();
 }
-void MetalBackend::matmul(const Tensor&, const Tensor&, Tensor&){
+
+void MetalBackend::matmul(const Tensor&, const Tensor&, Tensor&) {
   OpScope scope(*impl_);
   fail<UnsupportedError>("Metal matmul lands in Task 14");
 }
-void MetalBackend::rms_norm(const Tensor&, const Tensor&, float, Tensor&){
+
+void MetalBackend::rms_norm(const Tensor& x, const Tensor& weight, float eps, Tensor& out) {
   OpScope scope(*impl_);
-  fail<UnsupportedError>("Metal rms_norm lands in Task 13");
+  expect_dtype(x, DType::F32, "rms_norm input");
+  expect_dtype(weight, DType::F32, "rms_norm weight");
+  expect_shape(weight, Shape{x.cols()}, "rms_norm weight");
+  expect_dtype(out, DType::F32, "rms_norm output");
+  expect_shape(out, x.shape(), "rms_norm output");
+  constexpr NSUInteger kReads = 4, kLoopedLimit = 4096, kSimd = 32;  // RMS_N_READS, RMS_LOOPED_LIMIT
+  const auto axis = static_cast<uint32_t>(x.cols());
+  const uint32_t w_stride = 1;
+
+  if (x.numel() > 0) {
+    // MLX dispatch: one threadgroup per row, sized to cover the row in reads of 4; rows longer than
+    // the limit (or than one threadgroup can cover) use the looped kernel at the maximum size.
+    id<MTLComputePipelineState> pso = impl_->pipeline("rms_f32");
+    NSUInteger threads = kSimd * (((axis + kReads - 1) / kReads + kSimd - 1) / kSimd);
+    if (axis > kLoopedLimit || threads > pso.maxTotalThreadsPerThreadgroup) {
+      pso = impl_->pipeline("rms_looped_f32");
+      threads = pso.maxTotalThreadsPerThreadgroup;
+    }
+    impl_->bind(x, 0);
+    impl_->bind(weight, 1);
+    impl_->bind(out, 2);
+    impl_->bind_value(eps, 3);
+    impl_->bind_value(axis, 4);
+    impl_->bind_value(w_stride, 5);
+    impl_->dispatch_groups(pso, MTLSizeMake(static_cast<NSUInteger>(x.rows()), 1, 1), MTLSizeMake(threads, 1, 1));
+  }
+  scope.finish();
 }
-void MetalBackend::rope_neox(Tensor&, const Tensor&, int, int, float){
+
+void MetalBackend::rope_neox(Tensor& x, const Tensor& positions, int num_heads, int head_dim, float theta) {
   OpScope scope(*impl_);
-  fail<UnsupportedError>("Metal rope_neox lands in Task 13");
+  expect_dtype(x, DType::F32, "rope input");
+  expect_dtype(positions, DType::I32, "rope positions");
+  if (head_dim % 2 != 0 || head_dim > kMaxHeadDim) fail<InvalidArgument>("rope head_dim {} unsupported", head_dim);
+  if (num_heads <= 0 || head_dim <= 0) fail<InvalidArgument>("rope needs positive num_heads and head_dim, got {} and {}", num_heads, head_dim);
+  expect_shape(positions, Shape{x.rows()}, "rope positions");
+  const int64_t T = positions.numel();
+  expect_shape(x, Shape{T, static_cast<int64_t>(num_heads) * head_dim}, "rope input");
+
+  // x viewed as ggml [ne0 = head_dim, ne1 = heads, ne2 = tokens]; byte strides; rotated in place.
+  ggml_metal_kargs_rope args{};
+  args.ne00 = args.ne0 = head_dim;
+  args.ne01 = args.ne1 = num_heads;
+  args.ne02 = args.ne2 = static_cast<int32_t>(T);
+  args.ne03 = args.ne3 = 1;
+  args.nb00 = args.nb0 = sizeof(float);
+  args.nb01 = args.nb1 = static_cast<uint64_t>(head_dim) * sizeof(float);
+  args.nb02 = args.nb2 = x.row_bytes();
+  args.nb03 = args.nb3 = x.nbytes();
+  args.n_dims = head_dim;
+  args.n_offs = 0;
+  args.n_ctx_orig = 0;
+  args.freq_base = theta;
+  args.freq_scale = 1.0f;
+  args.ext_factor = 0.0f;  // plain RoPE: no YaRN
+  args.attn_factor = 1.0f;
+  args.beta_fast = 32.0f;
+  args.beta_slow = 1.0f;
+  args.src2 = true;  // tie's kernel reads inv_freq from the freq-factor slot
+  args.inplace = true;
+  std::array<float, kMaxHeadDim / 2> inv_freq{};  // same table as the CPU backend: identical angles
+  rope_inv_freq(theta, head_dim, inv_freq.data());
+
+  id<MTLComputePipelineState> pso = impl_->pipeline(
+      "kernel_rope_neox_f32", {{FC_ROPE + 0, true, 0} /* imrope */, {FC_ROPE + 1, true, 0} /* is_back */});
+  impl_->bind_value(args, 0);
+  impl_->bind(x, 1);
+  impl_->bind(positions, 2);
+  impl_->bind_value(inv_freq, 3);  // 2 KiB, under setBytes' 4 KiB limit
+  impl_->bind(x, 4);  // dst == src: in place
+  impl_->dispatch_groups(pso, MTLSizeMake(static_cast<NSUInteger>(num_heads), static_cast<NSUInteger>(T), 1),
+                         MTLSizeMake(std::min<NSUInteger>(1024, static_cast<NSUInteger>(head_dim)), 1, 1));
+  scope.finish();
 }
-void MetalBackend::silu_mul(const Tensor&, const Tensor&, Tensor&){
+
+void MetalBackend::silu_mul(const Tensor& gate, const Tensor& up, Tensor& out) {
   OpScope scope(*impl_);
-  fail<UnsupportedError>("Metal silu_mul lands in Task 13");
+  expect_dtype(gate, DType::F32, "silu_mul gate");
+  expect_dtype(up, DType::F32, "silu_mul up");
+  expect_dtype(out, DType::F32, "silu_mul output");
+  expect_shape(up, gate.shape(), "silu_mul up");
+  expect_shape(out, gate.shape(), "silu_mul output");
+  ggml_metal_kargs_glu args{};
+  args.ne00 = args.ne10 = args.ne0 = static_cast<int32_t>(gate.cols());
+  args.nb01 = args.nb11 = args.nb1 = gate.row_bytes();
+  args.i00 = args.i10 = 0;  // gate and up are separate tensors
+  args.alpha = 0.0f;
+  args.limit = 0.0f;
+
+  if (gate.numel() > 0) {
+    id<MTLComputePipelineState> pso = impl_->pipeline("kernel_swiglu_f32");
+    // llama.cpp: max(1, min(max threads, ne00 / 2)) threads stride over each row.
+    const NSUInteger threads = std::max<NSUInteger>(
+        1, std::min<NSUInteger>(pso.maxTotalThreadsPerThreadgroup, static_cast<NSUInteger>(gate.cols()) / 2));
+    impl_->bind_value(args, 0);
+    impl_->bind(gate, 1);
+    impl_->bind(up, 2);
+    impl_->bind(out, 3);
+    impl_->dispatch_groups(pso, MTLSizeMake(static_cast<NSUInteger>(gate.rows()), 1, 1), MTLSizeMake(threads, 1, 1));
+  }
+  scope.finish();
 }
 
 }  // namespace tie
