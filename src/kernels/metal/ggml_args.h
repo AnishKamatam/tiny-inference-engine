@@ -8,7 +8,12 @@
 #include <cstdint>
 #endif
 
+#define FC_MUL_MV 600
+#define FC_MUL_MM 700
 #define FC_ROPE 800
+
+#define N_R0_Q8_0 2
+#define N_SG_Q8_0 4
 
 typedef struct {
     int32_t  ne00;
@@ -72,3 +77,42 @@ typedef struct {
     uint64_t nb2;
     uint64_t nb3;
 } ggml_metal_kargs_get_rows;
+
+typedef struct {
+    int32_t  ne00;
+    int32_t  ne02;
+    uint64_t nb01;
+    uint64_t nb02;
+    uint64_t nb03;
+    int32_t  ne12;
+    uint64_t nb10;
+    uint64_t nb11;
+    uint64_t nb12;
+    uint64_t nb13;
+    int32_t  ne0;
+    int32_t  ne1;
+    int16_t  r2;
+    int16_t  r3;
+} ggml_metal_kargs_mul_mm;
+
+typedef struct {
+    int32_t  ne00;
+    int32_t  ne01;
+    int32_t  ne02;
+    uint64_t nb00;
+    uint64_t nb01;
+    uint64_t nb02;
+    uint64_t nb03;
+    int32_t  ne10;
+    int32_t  ne11;
+    int32_t  ne12;
+    uint64_t nb10;
+    uint64_t nb11;
+    uint64_t nb12;
+    uint64_t nb13;
+    int32_t  ne0;
+    int32_t  ne1;
+    int32_t  nr0;
+    int16_t  r2;
+    int16_t  r3;
+} ggml_metal_kargs_mul_mv;

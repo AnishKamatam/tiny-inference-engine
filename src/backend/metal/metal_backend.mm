@@ -309,9 +309,96 @@ void MetalBackend::embed(const Tensor& table, const Tensor& ids, Tensor& out) {
   scope.finish();
 }
 
-void MetalBackend::matmul(const Tensor&, const Tensor&, Tensor&) {
+void MetalBackend::matmul(const Tensor& x, const Tensor& w, Tensor& out) {
   OpScope scope(*impl_);
-  fail<UnsupportedError>("Metal matmul lands in Task 14");
+  // Same checks as CpuBackend::matmul, plus K % 4 == 0: the kernels read 4-wide.
+  expect_dtype(x, DType::F32, "matmul input");
+  expect_dtype(out, DType::F32, "matmul output");
+  const char* mv_kernel = nullptr;
+  const char* mm_kernel = nullptr;
+  switch (w.dtype()) {
+    case DType::F32: mv_kernel = "kernel_mul_mv_f32_f32_4"; mm_kernel = "kernel_mul_mm_f32_f32"; break;
+    case DType::F16: mv_kernel = "kernel_mul_mv_f16_f32_4"; mm_kernel = "kernel_mul_mm_f16_f32"; break;
+    case DType::BF16: mv_kernel = "kernel_mul_mv_bf16_f32_4"; mm_kernel = "tie_mul_mm_bf16_f32"; break;
+    case DType::Q8_0: mv_kernel = "kernel_mul_mv_q8_0_f32"; mm_kernel = "kernel_mul_mm_q8_0_f32"; break;
+    default: fail<InvalidArgument>("matmul weight dtype {} unsupported", tie::name(w.dtype()));
+  }
+  const int64_t T = x.rows();
+  const int64_t K = x.cols();
+  const int64_t N = w.rows();
+  if (w.cols() != K) fail<InvalidArgument>("matmul: input {} does not match weight {}", x.shape().str(), w.shape().str());
+  if (w.dtype() == DType::Q8_0 && K % kQ8_0BlockElems != 0) {
+    fail<InvalidArgument>("matmul: Q8_0 weight needs K divisible by {}, got {}", kQ8_0BlockElems, K);
+  }
+  expect_shape(out, Shape{T, N}, "matmul output");
+  if (K % 4 != 0) fail<InvalidArgument>("Metal matmul needs K % 4 == 0, got {}", K);
+  // llama.cpp's rule (ggml_metal_op_mul_mat_use_mm): the matmul kernel for K >= 64 and more than 8 rows.
+  const bool use_mm = T > 8 && K >= 64;
+  // The matvec kernels read weight rows in pairs, so an odd N would read one row past the
+  // weights (possibly past the end of a memory-mapped file). The matmul path clamps its reads.
+  if (!use_mm && N % 2 != 0) {
+    fail<InvalidArgument>("Metal matvec kernels process weight rows in pairs: N must be even, got {}", N);
+  }
+
+  impl_->bind(w, 1);
+  impl_->bind(x, 2);
+  impl_->bind(out, 3);
+
+  if (use_mm) {
+    // Prefill: 64 (N) x 32 (T) output tiles; the grid is (T tiles, N tiles). Host values follow
+    // ggml_metal_library_get_pipeline_mul_mm and ggml_metal_op_mul_mat (non-tensor path).
+    ggml_metal_kargs_mul_mm args{};
+    args.ne00 = static_cast<int32_t>(K);
+    args.ne02 = 1;
+    args.nb01 = w.row_bytes();
+    args.nb02 = args.nb03 = w.nbytes();
+    args.ne12 = 1;
+    args.nb10 = sizeof(float);
+    args.nb11 = x.row_bytes();
+    args.nb12 = args.nb13 = x.nbytes();
+    args.ne0 = static_cast<int32_t>(N);
+    args.ne1 = static_cast<int32_t>(T);
+    args.r2 = args.r3 = 1;
+    const bool bc_inp = K % 32 != 0;
+    const bool bc_out = N % 64 != 0 || T % 32 != 0;
+    id<MTLComputePipelineState> pso = impl_->pipeline(
+        mm_kernel, {{FC_MUL_MM + 0, true, bc_inp}, {FC_MUL_MM + 1, true, bc_out}, {FC_MUL_MM + 2, false, 1} /* ne12 */,
+                    {FC_MUL_MM + 3, false, 1} /* ne13 */, {FC_MUL_MM + 4, false, 1} /* r2 */,
+                    {FC_MUL_MM + 5, false, 1} /* r3 */});
+    impl_->bind_value(args, 0);
+    impl_->dispatch_groups(pso, MTLSizeMake(static_cast<NSUInteger>((T + 31) / 32), static_cast<NSUInteger>((N + 63) / 64), 1),
+                           MTLSizeMake(32, 4, 1), bc_out ? 8192 : 4096 + 2048);
+  } else {
+    // Decode: each threadgroup reduces 2 weight rows against one activation row. Host values follow
+    // ggml_metal_library_get_pipeline_mul_mv and ggml_metal_op_mul_mat_mv.
+    const bool q8 = w.dtype() == DType::Q8_0;
+    const int nsg = q8 ? N_SG_Q8_0 : static_cast<int>(std::min<int64_t>(4, (K + 127) / 128));
+    constexpr int nr0 = 2;  // N_R0_Q8_0, and the only case the t_t_4 dispatcher instantiates
+    ggml_metal_kargs_mul_mv args{};
+    args.ne00 = static_cast<int32_t>(K);
+    args.ne01 = static_cast<int32_t>(N);
+    args.ne02 = 1;
+    args.nb00 = static_cast<uint64_t>(traits(w.dtype()).block_bytes);  // GGML type size: one element, or one Q8_0 block
+    args.nb01 = w.row_bytes();
+    args.nb02 = args.nb03 = w.nbytes();
+    args.ne10 = static_cast<int32_t>(K);
+    args.ne11 = static_cast<int32_t>(T);
+    args.ne12 = 1;
+    args.nb10 = sizeof(float);
+    args.nb11 = x.row_bytes();
+    args.nb12 = args.nb13 = x.nbytes();
+    args.ne0 = static_cast<int32_t>(N);
+    args.ne1 = static_cast<int32_t>(T);
+    args.nr0 = nr0;
+    args.r2 = args.r3 = 1;
+    id<MTLComputePipelineState> pso = impl_->pipeline(
+        mv_kernel, {{FC_MUL_MV + 0, false, nsg}, {FC_MUL_MV + 2, false, 1} /* ne12 */, {FC_MUL_MV + 3, false, 1} /* r2 */,
+                    {FC_MUL_MV + 4, false, 1} /* r3 */, {FC_MUL_MV + 5, true, 0} /* split */});
+    impl_->bind_value(args, 0);
+    impl_->dispatch_groups(pso, MTLSizeMake(static_cast<NSUInteger>((N + nr0 - 1) / nr0), static_cast<NSUInteger>(T), 1),
+                           MTLSizeMake(32, static_cast<NSUInteger>(nsg), 1), 32 * sizeof(float) * nr0);
+  }
+  scope.finish();
 }
 
 void MetalBackend::rms_norm(const Tensor& x, const Tensor& weight, float eps, Tensor& out) {

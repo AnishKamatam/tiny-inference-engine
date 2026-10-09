@@ -24,6 +24,8 @@ class MetalBackend final : public Backend {
   void end_step() override;
 
   void embed(const Tensor& table, const Tensor& ids, Tensor& out) override;
+  // Same checks as the CPU, plus K % 4 == 0; with T <= 8 or K < 64 (the matvec kernels,
+  // which read weight rows in pairs) N must also be even.
   void matmul(const Tensor& x, const Tensor& w, Tensor& out) override;
   void rms_norm(const Tensor& x, const Tensor& weight, float eps, Tensor& out) override;
   void rope_neox(Tensor& x, const Tensor& positions, int num_heads, int head_dim, float theta) override;

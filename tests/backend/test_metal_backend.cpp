@@ -130,12 +130,16 @@ TEST_CASE("destroying a backend with an open step is safe") {
   CHECK(true);
 }
 
-TEST_CASE("a validation failure or stub throw inside a step discards the whole step") {
+TEST_CASE("a validation failure in any op inside a step discards the whole step") {
   MetalBackend metal;
   const OwnedTensor a = test::on(metal, test::random_f32(Shape{4}, 10));
   const OwnedTensor ints = test::on(metal, test::i32_tensor({1, 2, 3, 4}));
   OwnedTensor out(metal, DType::F32, Shape{4});
   for (int i = 0; i < 4; ++i) out.data<float>()[i] = -1.0f;
+  // K = 6 passes the CPU's checks but not Metal's K % 4 == 0, so matmul throws mid-step.
+  const OwnedTensor x6 = test::on(metal, test::random_f32(Shape{1, 6}, 11));
+  const OwnedTensor w6 = test::on(metal, test::random_f32(Shape{2, 6}, 12));
+  OwnedTensor mm_out(metal, DType::F32, Shape{1, 2});
 
   metal.begin_step();
   metal.add(a.t, a.t, out.t);
@@ -145,7 +149,7 @@ TEST_CASE("a validation failure or stub throw inside a step discards the whole s
 
   metal.begin_step();
   metal.add(a.t, a.t, out.t);
-  CHECK_THROWS_AS(metal.matmul(a.t, a.t, out.t), UnsupportedError);  // stub until Task 14, which must move this probe again
+  CHECK_THROWS_AS(metal.matmul(x6.t, w6.t, mm_out.t), InvalidArgument);  // a second op type: matmul's own check
   CHECK_THROWS_AS(metal.end_step(), InvalidArgument);
   for (int i = 0; i < 4; ++i) CHECK(out.data<float>()[i] == -1.0f);
 

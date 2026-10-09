@@ -9,6 +9,9 @@ From llama.cpp (https://github.com/ggml-org/llama.cpp), commit 9c2e0e491a822adae
                                        tie changes: precise::cos/sin in rope_yarn; the angle uses a
                                        host-computed inv_freq table (HF formula) passed in the
                                        freq-factor slot instead of pow(freq_base, ...)
+  src/kernels/metal/mul_mv.metal    <- ggml-metal/kernels/mul_mv.metal (t_t_4 and q8_0 matvec)
+  src/kernels/metal/mul_mm.metal    <- ggml-metal/kernels/mul_mm.metal (simdgroup matmul; BF16 instance
+                                       changed to half staging)
 
 From MLX (https://github.com/ml-explore/mlx), commit 97029597882f674a596958bc71fdec3213ccc192:
   src/kernels/metal/rms_norm.metal  <- mlx/backend/metal/kernels/rms_norm.metal
