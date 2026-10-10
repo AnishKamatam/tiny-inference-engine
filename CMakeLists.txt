@@ -83,6 +83,14 @@ set_source_files_properties(src/backend/metal/metal_backend.mm PROPERTIES COMPIL
 set_source_files_properties(${TIE_METAL_EMBED} PROPERTIES COMPILE_OPTIONS "-w")
 target_link_libraries(tie_core PUBLIC nlohmann_json::nlohmann_json "-framework CoreFoundation" "-framework Metal" "-framework Foundation")
 
+add_library(tie_cli STATIC src/cli/args.cpp)
+target_compile_options(tie_cli PRIVATE ${TIE_WARNINGS} ${TIE_ARCH})
+target_link_libraries(tie_cli PUBLIC tie_core)
+
+add_executable(tie src/cli/main.cpp)
+target_compile_options(tie PRIVATE ${TIE_WARNINGS} ${TIE_ARCH})
+target_link_libraries(tie PRIVATE tie_cli)
+
 enable_testing()
 add_executable(tie_tests
   tests/test_main.cpp
@@ -93,6 +101,7 @@ add_executable(tie_tests
   tests/backend/test_metal_backend.cpp
   tests/backend/test_metal_matmul.cpp
   tests/backend/test_metal_ops.cpp
+  tests/cli/test_args.cpp
   tests/core/test_dtype.cpp
   tests/core/test_tensor.cpp
   tests/core/test_thread_pool.cpp
@@ -117,5 +126,5 @@ add_executable(tie_tests
 target_include_directories(tie_tests PRIVATE tests)
 target_compile_options(tie_tests PRIVATE ${TIE_WARNINGS} ${TIE_ARCH})
 target_compile_definitions(tie_tests PRIVATE TIE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
-target_link_libraries(tie_tests PRIVATE tie_core doctest::doctest)
+target_link_libraries(tie_tests PRIVATE tie_cli doctest::doctest)
 add_test(NAME tie_tests COMMAND tie_tests)
