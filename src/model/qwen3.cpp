@@ -151,6 +151,7 @@ namespace {
 Tensor prefix(const Tensor& t, int64_t n) { return Tensor(t.buffer(), t.offset(), t.dtype(), Shape{n}); }
 
 void copy_into(const Tensor& dst, std::span<const int32_t> src) {
+  if (src.empty()) return;
   std::memcpy(dst.raw(), src.data(), src.size_bytes());
 }
 
@@ -164,8 +165,8 @@ void Qwen3Model::forward(const BatchInput& in, PagedKVCache& cache, std::vector<
     fail<CapacityError>("step has {} tokens; the model allows 1 to {}", T, limits_.max_tokens_per_step);
   }
   if (S < 1 || S > limits_.max_seqs) fail<CapacityError>("step has {} sequences; the model allows 1 to {}", S, limits_.max_seqs);
-  if (R < 1 || R > limits_.max_logit_rows) {
-    fail<CapacityError>("step requests {} logit rows; the model allows 1 to {}", R, limits_.max_logit_rows);
+  if (R > limits_.max_logit_rows) {
+    fail<CapacityError>("step requests {} logit rows; the model allows 0 to {}", R, limits_.max_logit_rows);
   }
   if (static_cast<int64_t>(in.positions.size()) != T || static_cast<int64_t>(in.slot_mapping.size()) != T ||
       static_cast<int64_t>(in.query_start.size()) != S + 1 ||
@@ -242,6 +243,12 @@ void Qwen3Model::forward(const BatchInput& in, PagedKVCache& cache, std::vector<
       layer_hook_(static_cast<int>(l), x);
       backend_.begin_step();
     }
+  }
+
+  if (R == 0) {  // the step only fills the cache
+    backend_.end_step();
+    logits.clear();
+    return;
   }
 
   // Only the requested rows reach the final norm and the vocabulary projection.

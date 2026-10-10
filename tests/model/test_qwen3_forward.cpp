@@ -271,3 +271,39 @@ TEST_CASE("Qwen3-0.6B on Metal agrees with the CPU reference") {
     CHECK(agree + 1 >= ids.size());  // half-precision prefill tiles may flip at most one near-tie
   }
 }
+
+TEST_CASE("a step without logit rows only fills the cache") {
+  CpuBackend cpu(4);
+  MetalBackend metal;
+  const LoadedModel m = test::make_tiny_model(11);
+  const std::vector<int32_t> ids = prompt(10);
+  const size_t V = size_t(m.config.vocab_size);
+  const auto run_on = [&](Backend& be, bool first_logits) {
+    Qwen3Model model(be, m, limits(32, 1, 1));
+    PagedKVCache cache(be, cache_config(m.config));
+    BlockTable table;
+    std::vector<int32_t> slots, tables(64, 0), logits;
+    std::vector<float> out;
+    // Runs ids[begin, end) as one step; `want_logits` requests the last row.
+    const auto step = [&](int begin, int end, bool want_logits) {
+      slots.clear();
+      cache.append_slots(table, begin, end, slots);
+      std::copy(table.begin(), table.end(), tables.begin());
+      std::vector<int32_t> tokens(ids.begin() + begin, ids.begin() + end), positions;
+      for (int p = begin; p < end; ++p) positions.push_back(p);
+      const std::vector<int32_t> query_start = {0, end - begin}, context_lens = {end};
+      const std::vector<int32_t> rows = want_logits ? std::vector<int32_t>{end - begin - 1} : std::vector<int32_t>{};
+      model.forward(BatchInput{tokens, positions, slots, query_start, context_lens, tables, rows}, cache, out);
+    };
+    step(0, 6, first_logits);
+    CHECK(out.empty() != first_logits);
+    step(6, 10, true);
+    return out;
+  };
+  // Same step shapes (so the same Metal kernels), with and without logits for the first step.
+  for (Backend* be : {static_cast<Backend*>(&cpu), static_cast<Backend*>(&metal)}) {
+    const std::vector<float> got = run_on(*be, false);
+    REQUIRE(got.size() == V);
+    CHECK(max_abs_diff(got, run_on(*be, true)) < 1e-4f);
+  }
+}

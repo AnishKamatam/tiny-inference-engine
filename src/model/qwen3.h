@@ -28,7 +28,7 @@ struct BatchInput {
   std::span<const int32_t> query_start;   // [S + 1] batch rows of each sequence
   std::span<const int32_t> context_lens;  // [S] cached tokens per sequence after this step
   std::span<const int32_t> block_tables;  // [S * limits.max_blocks_per_seq], row-major
-  std::span<const int32_t> logit_rows;    // batch rows whose logits are returned
+  std::span<const int32_t> logit_rows;    // batch rows whose logits are returned; may be empty for steps that only fill the cache
 };
 
 // Qwen3 decoder. Weights are used in place (mmapped files wrapped, not copied),
@@ -44,7 +44,8 @@ class Qwen3Model {
   const ModelLimits& limits() const { return limits_; }
 
   // Runs one step: writes this step's K/V into `cache` and returns the logits of
-  // `input.logit_rows` as a row-major [rows, vocab_size] matrix in `logits`.
+  // `input.logit_rows` as a row-major [rows, vocab_size] matrix in `logits`
+  // (cleared when `logit_rows` is empty; the final norm and vocabulary projection are skipped).
   void forward(const BatchInput& input, PagedKVCache& cache, std::vector<float>& logits);
 
   // Test/debug hook observing the residual stream [T, hidden] after each layer.

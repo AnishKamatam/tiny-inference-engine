@@ -57,6 +57,8 @@ add_library(tie_core STATIC
   src/core/dtype.cpp
   src/core/tensor.cpp
   src/core/thread_pool.cpp
+  src/engine/engine.cpp
+  src/engine/scheduler.cpp
   src/kernels/cpu/q8_0.cpp
   src/kernels/cpu/vec.cpp
   src/kv/block_pool.cpp
@@ -94,6 +96,8 @@ add_executable(tie_tests
   tests/core/test_dtype.cpp
   tests/core/test_tensor.cpp
   tests/core/test_thread_pool.cpp
+  tests/engine/test_engine.cpp
+  tests/engine/test_scheduler.cpp
   tests/kv/test_block_pool.cpp
   tests/kv/test_paged_kv_cache.cpp
   tests/model/test_config.cpp
