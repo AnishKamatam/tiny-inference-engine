@@ -61,6 +61,13 @@ int32_t Engine::add_request(std::vector<int32_t> prompt, const SamplingParams& p
 void Engine::step() {
   const ScheduledBatch batch = scheduler_->schedule();
   if (batch.empty()) return;
+  // A scheduler bug must fail loudly here, before any block is reserved or progress recorded.
+  for (const ScheduledSeq& s : batch.seqs) {
+    if (s.num_tokens <= 0 || s.num_tokens > config_.max_tokens_per_step || s.num_tokens > s.seq->num_pending()) {
+      fail<InvalidArgument>("scheduler gave sequence {} {} tokens; it has {} pending and a step allows at most {}",
+                            s.seq->id, s.num_tokens, s.seq->num_pending(), config_.max_tokens_per_step);
+    }
+  }
 
   for (auto* v : {&tokens_, &positions_, &slots_, &query_start_, &context_lens_, &block_tables_, &logit_rows_}) v->clear();
   sampled_.clear();
@@ -121,8 +128,12 @@ void Engine::step() {
       seq.state = SeqState::Decoding;
       if (on_token_) on_token_(seq.id, token);
     } catch (...) {
-      // A sequence that cannot continue must not wedge the scheduler or leak its blocks.
-      finish(seq, FinishReason::Error);
+      // A sequence that cannot continue must not wedge the scheduler or leak its blocks. The
+      // sequences after it already count this step as computed but will never get its token,
+      // so they cannot continue either.
+      for (size_t k = i; k < sampled_.size(); ++k) {
+        if (sampled_[k]->state != SeqState::Finished) finish(*sampled_[k], FinishReason::Error);
+      }
       throw;
     }
     if (std::ranges::find(config_.stop_tokens, token) != config_.stop_tokens.end()) {
@@ -153,7 +164,15 @@ void Engine::release(int32_t id) {
 
 std::vector<int32_t> Engine::generate(std::vector<int32_t> prompt, const SamplingParams& params) {
   const int32_t id = add_request(std::move(prompt), params);
-  while (sequence(id).state != SeqState::Finished) step();
+  try {
+    while (sequence(id).state != SeqState::Finished) step();
+  } catch (...) {
+    // Don't leak the request: a failed forward leaves it running in the scheduler.
+    Sequence& seq = *sequences_.at(id);
+    if (seq.state != SeqState::Finished) finish(seq, FinishReason::Error);
+    sequences_.erase(id);
+    throw;
+  }
   const Sequence& seq = sequence(id);
   std::vector<int32_t> out(seq.tokens.begin() + seq.prompt_len, seq.tokens.end());
   release(id);

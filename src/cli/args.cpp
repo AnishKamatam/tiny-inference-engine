@@ -2,8 +2,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <cmath>
-#include <utility>
+#include <cstdint>
 #include <string>
 #include <type_traits>
 
@@ -15,21 +16,23 @@ namespace {
 
 template <typename T>
 T parse_number(std::string_view flag, std::string_view text) {
-  const std::string s(text);
-  size_t used = 0;
-  try {
-    if constexpr (std::is_floating_point_v<T>) {
-      const double d = std::stod(s, &used);  // accepts "inf" and "nan", which no option can use
-      if (used == s.size() && std::isfinite(d)) return static_cast<T>(d);
-    } else {
-      const long long n = std::stoll(s, &used);
-      if (used == s.size() && std::in_range<T>(n)) {
-        return static_cast<T>(n);
+  if constexpr (std::is_floating_point_v<T>) {
+    const std::string s(text);
+    size_t used = 0;
+    try {
+      if (!s.empty() && !std::isspace(static_cast<unsigned char>(s[0]))) {
+        const T value = static_cast<T>(std::stod(s, &used));  // accepts "inf" and "nan", which no option can use
+        if (used == s.size() && std::isfinite(value)) return value;
       }
+    } catch (const std::exception&) {
     }
-  } catch (const std::exception&) {
+    fail<InvalidArgument>("{} expects a finite number, got '{}'", flag, text);
+  } else {
+    T value{};
+    const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), value);
+    if (ec == std::errc{} && end == text.data() + text.size()) return value;
+    fail<InvalidArgument>("{} expects an integer, got '{}'", flag, text);
   }
-  fail<InvalidArgument>("{} expects a finite number, got '{}'", flag, text);
 }
 
 }  // namespace
@@ -68,7 +71,10 @@ size_t parse_size(std::string_view text) {
   if (digits.empty() || !std::all_of(digits.begin(), digits.end(), [](char c) { return std::isdigit(static_cast<unsigned char>(c)); })) {
     fail<InvalidArgument>("size '{}' must be a whole number with an optional K, M or G suffix", text);
   }
-  const size_t value = std::stoull(std::string(digits)) << shift;
+  size_t base = 0;
+  const auto [end, ec] = std::from_chars(digits.data(), digits.data() + digits.size(), base);
+  if (ec != std::errc{} || base > (SIZE_MAX >> shift)) fail<InvalidArgument>("size '{}' is too large", text);
+  const size_t value = base << shift;
   if (value == 0) fail<InvalidArgument>("size '{}' must be positive", text);
   return value;
 }
@@ -107,7 +113,11 @@ GenerateOptions parse_generate_args(std::span<const std::string_view> args) {
     } else if (flag == "--seed") {
       o.sampling.seed = parse_number<uint64_t>(flag, value());
     } else if (flag == "--kv-mem") {
-      o.kv_bytes = parse_size(value());
+      try {
+        o.kv_bytes = parse_size(value());
+      } catch (const InvalidArgument& e) {
+        fail<InvalidArgument>("{}: {}", flag, e.what());
+      }
     } else if (flag == "--threads") {
       o.threads = parse_number<int>(flag, value());
     } else {

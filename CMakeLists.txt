@@ -40,11 +40,13 @@ set(TIE_METAL_SOURCES
 )
 string(REPLACE ";" "|" TIE_METAL_SOURCES_ARG "${TIE_METAL_SOURCES}")
 set(TIE_METAL_EMBED ${CMAKE_BINARY_DIR}/generated/metal_source.cpp)
-add_custom_command(
-  OUTPUT ${TIE_METAL_EMBED}
+# Runs on every build but rewrites the generated file only when its content changes, so the
+# embedded shader can never go stale (mtimes are not trusted) and an unchanged shader does
+# not trigger a recompile.
+add_custom_target(tie_embed_metal
   COMMAND ${CMAKE_COMMAND} -DOUTPUT=${TIE_METAL_EMBED} -DSOURCES=${TIE_METAL_SOURCES_ARG}
           -P ${CMAKE_SOURCE_DIR}/cmake/embed_metal.cmake
-  DEPENDS ${TIE_METAL_SOURCES} ${CMAKE_SOURCE_DIR}/cmake/embed_metal.cmake
+  BYPRODUCTS ${TIE_METAL_EMBED}
   COMMENT "Embedding Metal shader source"
   VERBATIM)
 
@@ -81,6 +83,7 @@ target_compile_options(tie_core PRIVATE ${TIE_WARNINGS} ${TIE_ARCH})
 set_source_files_properties(src/backend/metal/metal_backend.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 # The generated file is one long string literal; -Woverlength-strings does not apply to it.
 set_source_files_properties(${TIE_METAL_EMBED} PROPERTIES COMPILE_OPTIONS "-w")
+add_dependencies(tie_core tie_embed_metal)
 target_link_libraries(tie_core PUBLIC nlohmann_json::nlohmann_json "-framework CoreFoundation" "-framework Metal" "-framework Foundation")
 
 add_library(tie_cli STATIC src/cli/args.cpp)

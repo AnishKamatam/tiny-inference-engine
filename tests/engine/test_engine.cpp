@@ -30,7 +30,8 @@ struct Rig {
   std::unique_ptr<Engine> engine;
 
   Rig(LoadedModel w, int32_t max_tokens_per_step, std::vector<int32_t> stop_tokens = {},
-      size_t kv_blocks = 256, DType kv_dtype = DType::F32, int32_t max_blocks_per_seq = 0)
+      size_t kv_blocks = 256, DType kv_dtype = DType::F32, int32_t max_blocks_per_seq = 0, int32_t max_seqs = 1,
+      std::unique_ptr<Scheduler> scheduler = nullptr)
       : weights(std::move(w)) {
     const ModelConfig& c = weights.config;
     KVCacheConfig kc;
@@ -46,12 +47,15 @@ struct Rig {
     limits.max_tokens_per_step = max_tokens_per_step;
     limits.max_blocks_per_seq =
         max_blocks_per_seq > 0 ? max_blocks_per_seq : PagedKVCache::blocks_for(c.max_position_embeddings, kc.block_size);
+    limits.max_seqs = max_seqs;
+    limits.max_logit_rows = max_seqs;
     model = std::make_unique<Qwen3Model>(backend, weights, limits);
 
     EngineConfig ec;
     ec.max_tokens_per_step = max_tokens_per_step;
     ec.stop_tokens = std::move(stop_tokens);
-    engine = std::make_unique<Engine>(*model, *cache, std::make_unique<FcfsScheduler>(max_tokens_per_step), ec);
+    if (!scheduler) scheduler = std::make_unique<FcfsScheduler>(max_tokens_per_step);
+    engine = std::make_unique<Engine>(*model, *cache, std::move(scheduler), ec);
   }
 };
 
@@ -66,6 +70,25 @@ SamplingParams greedy(int32_t max_tokens) {
   p.max_tokens = max_tokens;
   return p;
 }
+
+// Test-only: runs every queued sequence in one step, each with all its pending tokens
+// (or a fixed, possibly invalid, token count), which FcfsScheduler never does.
+class AllAtOnceScheduler final : public Scheduler {
+ public:
+  explicit AllAtOnceScheduler(int32_t forced_num_tokens = -1) : forced_num_tokens_(forced_num_tokens) {}
+  void add(Sequence* seq) override { seqs_.push_back(seq); }
+  ScheduledBatch schedule() override {
+    ScheduledBatch batch;
+    for (Sequence* seq : seqs_) batch.seqs.push_back({seq, forced_num_tokens_ >= 0 ? forced_num_tokens_ : seq->num_pending()});
+    return batch;
+  }
+  void finish(Sequence* seq) override { std::erase(seqs_, seq); }
+  bool has_work() const override { return !seqs_.empty(); }
+
+ private:
+  int32_t forced_num_tokens_;
+  std::vector<Sequence*> seqs_;
+};
 
 }  // namespace
 
@@ -240,4 +263,47 @@ TEST_CASE("a step whose forward fails rolls back its blocks and progress") {
   CHECK(seq.num_computed == 0);
   CHECK(seq.block_table.empty());
   CHECK(wrong.num_free_blocks() == free_before);
+}
+
+TEST_CASE("a failing token callback in a two-sequence step finishes both sequences") {
+  Rig rig(test::make_tiny_model(8), 64, {}, 256, DType::F32, 0, /*max_seqs=*/2, std::make_unique<AllAtOnceScheduler>());
+  const int32_t total = rig.cache->num_free_blocks();
+  rig.engine->set_token_callback([](int32_t, int32_t) { throw std::runtime_error("callback failed"); });
+  const int32_t a = rig.engine->add_request(prompt(6), greedy(4));
+  const int32_t b = rig.engine->add_request(prompt(5), greedy(3));
+  CHECK_THROWS_AS(rig.engine->step(), std::runtime_error);
+  for (int32_t id : {a, b}) {
+    CHECK(rig.engine->sequence(id).state == SeqState::Finished);
+    CHECK(rig.engine->sequence(id).finish_reason == FinishReason::Error);
+  }
+  CHECK(rig.cache->num_free_blocks() == total);
+  CHECK_FALSE(rig.engine->has_work());
+}
+
+TEST_CASE("step rejects a scheduled token count the engine cannot run, before touching state") {
+  for (int32_t bad : {0, 65}) {
+    CAPTURE(bad);
+    Rig rig(test::make_tiny_model(9), 64, {}, 256, DType::F32, 0, 1, std::make_unique<AllAtOnceScheduler>(bad));
+    const int32_t total = rig.cache->num_free_blocks();
+    const int32_t id = rig.engine->add_request(prompt(70), greedy(2));
+    CHECK_THROWS_AS(rig.engine->step(), InvalidArgument);
+    CHECK(rig.engine->sequence(id).num_computed == 0);
+    CHECK(rig.engine->sequence(id).block_table.empty());
+    CHECK(rig.cache->num_free_blocks() == total);
+  }
+}
+
+TEST_CASE("generate cleans up its sequence when forward fails") {
+  Rig rig(test::make_tiny_model(7), 64);
+  KVCacheConfig kc = rig.cache->config();
+  kc.num_layers += 1;
+  PagedKVCache wrong(rig.backend, kc);
+  EngineConfig ec;
+  ec.max_tokens_per_step = 64;
+  Engine engine(*rig.model, wrong, std::make_unique<FcfsScheduler>(64), ec);
+  const int32_t total = wrong.num_free_blocks();
+  CHECK_THROWS_AS(engine.generate(prompt(10), greedy(3)), InvalidArgument);
+  CHECK_FALSE(engine.has_work());
+  CHECK(wrong.num_free_blocks() == total);
+  CHECK_THROWS_AS(engine.sequence(0), InvalidArgument);  // the failed request is no longer registered
 }

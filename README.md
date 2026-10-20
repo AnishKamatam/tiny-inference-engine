@@ -5,7 +5,7 @@ agent and tool workloads: many concurrent requests sharing long prefixes. The
 KV cache is paged from day one, so continuous batching and radix (prefix)
 caching are additions rather than rewrites.
 
-Status: (base runtime). Qwen3-0.6B runs on the GPU (Metal, the
+Status: sub-project 1 (base runtime) is complete. Qwen3-0.6B runs on the GPU (Metal, the
 default) and on the CPU, from GGUF (F32/F16/BF16/Q8_0) or HuggingFace
 safetensors. The CPU path matches HuggingFace token for token and is the
 reference the Metal kernels are tested against. Next sub-project: a

@@ -11,9 +11,13 @@ foreach(file IN LISTS source_files)
   get_filename_component(file_name "${file}" NAME)
   string(APPEND msl "// ---- ${file_name}\n${text}\n")
 endforeach()
-file(WRITE "${OUTPUT}"
+# Written to a temporary file and copied over OUTPUT only when the content differs, so an
+# unchanged shader keeps OUTPUT's timestamp and nothing recompiles.
+file(WRITE "${OUTPUT}.tmp"
   "// Generated from src/kernels/metal by cmake/embed_metal.cmake. Do not edit.\n"
   "namespace tie {\n"
   "extern const char kMetalSource[];\n"
   "const char kMetalSource[] = R\"TIEMSL(${msl})TIEMSL\";\n"
   "}  // namespace tie\n")
+file(COPY_FILE "${OUTPUT}.tmp" "${OUTPUT}" ONLY_IF_DIFFERENT)
+file(REMOVE "${OUTPUT}.tmp")

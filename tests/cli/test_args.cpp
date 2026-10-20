@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <cstdint>
 #include <string_view>
 #include <vector>
 
@@ -46,6 +47,21 @@ TEST_CASE("parse_generate_args applies defaults and rejects bad input") {
   CHECK_THROWS_AS(parse_generate_args(Args{"-m", "m", "-p", "x", "--device", "tpu"}), InvalidArgument);
 }
 
+TEST_CASE("parse_generate_args rejects out-of-range and malformed numbers") {
+  const auto with = [](std::string_view flag, std::string_view v) { return Args{"-m", "m", "-p", "x", flag, v}; };
+  CHECK_THROWS_AS(parse_generate_args(with("--max-tokens", "99999999999")), InvalidArgument);
+  CHECK_THROWS_AS(parse_generate_args(with("--seed", "-1")), InvalidArgument);
+  CHECK_THROWS_AS(parse_generate_args(with("--top-k", "+5")), InvalidArgument);
+  CHECK_THROWS_AS(parse_generate_args(with("--top-k", "5x")), InvalidArgument);
+  CHECK_THROWS_WITH_AS(parse_generate_args(with("--top-k", "2.5")), doctest::Contains("integer"), InvalidArgument);
+  CHECK(parse_generate_args(with("--seed", "18446744073709551615")).sampling.seed == UINT64_MAX);
+  CHECK_THROWS_WITH_AS(parse_generate_args(with("--temp", "1e39")), doctest::Contains("--temp"), InvalidArgument);
+  CHECK_THROWS_AS(parse_generate_args(Args{"-m", "m", "-p", "x", "--threads"}), InvalidArgument);
+  CHECK_THROWS_WITH_AS(parse_generate_args(with("--kv-mem", "1Q")), doctest::Contains("--kv-mem"), InvalidArgument);
+  CHECK_THROWS_WITH_AS(parse_generate_args(with("--kv-mem", "99999999999999999999")), doctest::Contains("--kv-mem"),
+                       InvalidArgument);
+}
+
 TEST_CASE("parse_size understands binary suffixes") {
   CHECK(parse_size("4G") == size_t{4} << 30);
   CHECK(parse_size("512M") == size_t{512} << 20);
@@ -54,4 +70,6 @@ TEST_CASE("parse_size understands binary suffixes") {
   CHECK_THROWS_AS(parse_size("0"), InvalidArgument);
   CHECK_THROWS_AS(parse_size("1.5G"), InvalidArgument);
   CHECK_THROWS_AS(parse_size("G"), InvalidArgument);
+  CHECK_THROWS_AS(parse_size("99999999999999999999"), InvalidArgument);
+  CHECK_THROWS_AS(parse_size("17179869184G"), InvalidArgument);
 }

@@ -474,7 +474,7 @@ void MetalBackend::rope_neox(Tensor& x, const Tensor& positions, int num_heads, 
   impl_->bind_value(args, 0);
   impl_->bind(x, 1);
   impl_->bind(positions, 2);
-  impl_->bind_value(inv_freq, 3);  // 2 KiB, under setBytes' 4 KiB limit
+  impl_->bind_value(inv_freq, 3);  // 256 floats = 1 KiB, under setBytes' 4 KiB limit
   impl_->bind(x, 4);  // dst == src: in place
   impl_->dispatch_groups(pso, MTLSizeMake(static_cast<NSUInteger>(num_heads), static_cast<NSUInteger>(T), 1),
                          MTLSizeMake(std::min<NSUInteger>(1024, static_cast<NSUInteger>(head_dim)), 1, 1));

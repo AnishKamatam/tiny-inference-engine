@@ -48,6 +48,10 @@ int run_generate(const tie::GenerateOptions& opt) {
     if (const auto id = tokenizer.find_token(stop)) engine_config.stop_tokens.push_back(*id);
   }
 
+  if (engine_config.stop_tokens.empty()) {
+    std::fprintf(stderr, "[tie] note: no <|im_end|> or <|endoftext|> token in this tokenizer; generating until max_tokens\n");
+  }
+
   KVCacheConfig kv;
   kv.num_layers = static_cast<int32_t>(config.num_layers);
   kv.num_kv_heads = static_cast<int32_t>(config.num_kv_heads);
@@ -78,11 +82,16 @@ int run_generate(const tie::GenerateOptions& opt) {
   // add_request + step loop rather than generate(), which releases the sequence before
   // the effective (capacity-clamped) max_tokens can be read.
   const int32_t seq_id = engine.add_request(prompt, opt.sampling);
-  while (engine.sequence(seq_id).state != SeqState::Finished) engine.step();
+  try {
+    while (engine.sequence(seq_id).state != SeqState::Finished) engine.step();
+  } catch (...) {
+    write(decoder.flush());  // keep the partial output well-formed before the error is reported
+    write("\n");
+    throw;
+  }
   write(decoder.flush());
   write("\n");
   const int32_t effective_max_tokens = engine.sequence(seq_id).params.max_tokens;
-  const FinishReason finish_reason = engine.sequence(seq_id).finish_reason;
   engine.release(seq_id);
 
   const EngineStats& s = engine.stats();
@@ -98,7 +107,6 @@ int run_generate(const tie::GenerateOptions& opt) {
   if (effective_max_tokens < opt.sampling.max_tokens) {
     std::fprintf(stderr, "[tie] note: max_tokens clamped to %d by the KV cache / context\n", effective_max_tokens);
   }
-  if (finish_reason == FinishReason::Error) std::fprintf(stderr, "[tie] warning: generation ended with an error\n");
   return 0;
 }
 

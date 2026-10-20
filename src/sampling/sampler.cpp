@@ -20,22 +20,22 @@ int32_t Sampler::sample(std::span<const float> logits, const SamplingParams& p, 
   for (size_t i = 0; i < logits.size(); ++i) {
     if (std::isnan(logits[i])) fail<InvalidArgument>("logit {} is NaN", i);
   }
-  const float max_raw = *std::max_element(logits.begin(), logits.end());
+  // max_element returns the first maximum, so ties (including several +inf) go to the lowest id.
+  const auto argmax = std::max_element(logits.begin(), logits.end());
+  const float max_raw = *argmax;
   if (max_raw == -INFINITY) fail<InvalidArgument>("all logits are -inf");
 
   // A subnormal temperature has a non-finite reciprocal; scaling would produce NaN, so it is greedy.
+  // A +inf logit is certain; exp(inf - inf) would be NaN.
   const float inv_temperature = p.temperature == 0.0f ? INFINITY : 1.0f / p.temperature;
-  if (!std::isfinite(inv_temperature)) {
-    return static_cast<int32_t>(std::max_element(logits.begin(), logits.end()) - logits.begin());
-  }
+  if (!std::isfinite(inv_temperature) || max_raw == INFINITY) return static_cast<int32_t>(argmax - logits.begin());
 
+  // Shift before scaling so the maximum maps to 0 and every other logit to [-inf, 0]: a tiny
+  // temperature can then neither overflow to +inf nor make every scaled logit -inf.
   candidates_.clear();
   candidates_.reserve(logits.size());
   for (size_t i = 0; i < logits.size(); ++i) {
-    const float scaled = logits[i] * inv_temperature;
-    // A +inf logit (or one that overflows when scaled) is certain; exp(inf - inf) would be NaN.
-    if (scaled == INFINITY) return static_cast<int32_t>(i);
-    candidates_.emplace_back(scaled, static_cast<int32_t>(i));
+    candidates_.emplace_back((logits[i] - max_raw) * inv_temperature, static_cast<int32_t>(i));
   }
 
   const auto more_likely = [](const auto& a, const auto& b) {

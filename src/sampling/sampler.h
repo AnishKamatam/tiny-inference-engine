@@ -26,7 +26,7 @@ class Sampler {
   // top_p, and draws from what is left using `rng`.
   //
   // Throws InvalidArgument on empty logits, any NaN logit, or logits that are all -inf.
-  // A +inf logit (including one produced by scaling) is treated as a certain token:
+  // A +inf logit is treated as a certain token:
   // the lowest-id +inf token is returned without consulting `rng`.
   int32_t sample(std::span<const float> logits, const SamplingParams& params, std::mt19937_64& rng);
 

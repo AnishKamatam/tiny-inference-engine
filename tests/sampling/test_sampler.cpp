@@ -138,3 +138,41 @@ TEST_CASE("NaN logits are rejected on both paths and infinite logits are handled
   CHECK(sampler.sample(std::vector<float>{-inf, 0.0f, -inf}, sampled, rng) == 1);
   CHECK_THROWS_AS(sampler.sample(std::vector<float>{-inf, -inf}, sampled, rng), InvalidArgument);
 }
+
+TEST_CASE("a tiny normal temperature whose scaled logits overflow still samples the argmax") {
+  Sampler sampler;
+  SamplingParams p;
+  p.temperature = 2e-38f;  // 1/t is finite, but logit/t overflows to +inf
+  REQUIRE(std::isfinite(1.0f / p.temperature));
+  for (uint64_t seed = 0; seed < 200; ++seed) {
+    std::mt19937_64 rng(seed);
+    CHECK(sampler.sample(std::vector<float>{5.0f, 6.0f}, p, rng) == 1);
+    CHECK(sampler.sample(std::vector<float>{10.0f, 11.0f, 9.0f}, p, rng) == 1);       // both top logits overflow to +inf
+    CHECK(sampler.sample(std::vector<float>{-17.0f, -13.0f, -15.0f}, p, rng) == 1);  // every scaled logit is -inf
+  }
+}
+
+TEST_CASE("all-negative logits sample by their softmax") {
+  SamplingParams p;
+  p.temperature = 1.0f;
+  Sampler sampler;
+  std::mt19937_64 rng(7);
+  const std::vector<float> logits = {std::log(0.7f) - 1000.0f, std::log(0.3f) - 1000.0f};
+  int first = 0;
+  const int draws = 20000;
+  for (int i = 0; i < draws; ++i) first += sampler.sample(logits, p, rng) == 0;
+  CHECK(double(first) / draws == doctest::Approx(0.7).epsilon(0.03));
+}
+
+TEST_CASE("a -inf logit is never drawn under top-p") {
+  const float inf = std::numeric_limits<float>::infinity();
+  Sampler sampler;
+  SamplingParams p;
+  p.temperature = 1.0f;
+  p.top_p = 0.999f;
+  for (float t : {1.0f, 2e-38f}) {
+    p.temperature = t;
+    std::mt19937_64 rng(3);
+    for (int i = 0; i < 2000; ++i) CHECK(sampler.sample(std::vector<float>{0.0f, -inf, 0.0f}, p, rng) != 1);
+  }
+}

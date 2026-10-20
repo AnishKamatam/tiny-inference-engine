@@ -38,8 +38,10 @@ class Engine {
   // generated token in the model context, the KV pool or a block-table row) is
   // rejected, with CapacityError, before any compute. Otherwise the request is
   // accepted and its max_tokens is clamped to the most that fits all three, so it
-  // runs until it finishes or reaches the capacity it can be given (FinishReason::Length),
-  // and cannot fail for capacity reasons mid-generation.
+  // runs until it finishes or reaches the capacity it can be given (FinishReason::Length).
+  // It cannot fail for capacity reasons mid-generation only because FcfsScheduler runs one
+  // sequence at a time against the whole KV pool; a scheduler that runs several sequences
+  // at once must reserve or preempt to keep that guarantee.
   int32_t add_request(std::vector<int32_t> prompt, const SamplingParams& params);
   void step();
   bool has_work() const { return scheduler_->has_work(); }
