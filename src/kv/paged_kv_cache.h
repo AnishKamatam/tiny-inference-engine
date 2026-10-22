@@ -43,10 +43,17 @@ class PagedKVCache {
     return static_cast<int32_t>((tokens + block_size - 1) / block_size);
   }
 
-  // Grows `table` to cover `new_len` tokens and appends the cache slot
-  // (block * block_size + offset) of every position in [old_len, new_len) to
-  // `slots`. All-or-nothing: on CapacityError neither `table` nor the pool changes.
-  void append_slots(BlockTable& table, int64_t old_len, int64_t new_len, std::vector<int32_t>& slots);
+  // Grows `table` to cover `new_len` tokens. All-or-nothing: returns false, changing
+  // nothing, when the pool lacks the blocks. A table already covering more is left as is.
+  bool reserve(BlockTable& table, int64_t new_len);
+  // Appends the cache slot (block * block_size + offset) of every position in
+  // [old_len, new_len) to `out`. Never allocates: the table must already cover new_len.
+  void slots(const BlockTable& table, int64_t old_len, int64_t new_len, std::vector<int32_t>& out) const;
+  // Releases the blocks of `table` beyond those `len` tokens need.
+  void truncate(BlockTable& table, int64_t len);
+  // reserve + slots for callers driving one sequence directly: `table` must hold exactly
+  // old_len tokens; CapacityError (nothing changed) when the pool lacks the blocks.
+  void append_slots(BlockTable& table, int64_t old_len, int64_t new_len, std::vector<int32_t>& slots_out);
   // Releases every block of `table` and clears it.
   void release(BlockTable& table);
 

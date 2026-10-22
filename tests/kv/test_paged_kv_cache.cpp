@@ -77,6 +77,56 @@ TEST_CASE("append_slots is all-or-nothing when the pool runs out") {
   CHECK(slots.empty());
 }
 
+TEST_CASE("reserve grows a table all-or-nothing and reports a shortfall") {
+  CpuBackend be(1);
+  PagedKVCache cache(be, small_config(3));
+  BlockTable table;
+  CHECK(cache.reserve(table, 5));  // 2 blocks
+  CHECK(table.size() == 2);
+  CHECK(cache.reserve(table, 8));  // still 2 blocks
+  CHECK(table.size() == 2);
+  CHECK_FALSE(cache.reserve(table, 13));  // needs 4 blocks; the pool has 3
+  CHECK(table.size() == 2);
+  CHECK(cache.num_free_blocks() == 1);
+  CHECK(cache.reserve(table, 12));
+  CHECK(cache.num_free_blocks() == 0);
+  CHECK(cache.reserve(table, 0));  // never shrinks
+  CHECK(table.size() == 3);
+  CHECK_THROWS_AS(cache.reserve(table, -1), InvalidArgument);
+}
+
+TEST_CASE("slots maps positions without allocating and rejects ranges the table does not cover") {
+  CpuBackend be(1);
+  PagedKVCache cache(be, small_config(4));
+  BlockTable table;
+  REQUIRE(cache.reserve(table, 6));
+  const int32_t free_before = cache.num_free_blocks();
+  std::vector<int32_t> out;
+  cache.slots(table, 0, 6, out);
+  REQUIRE(out.size() == 6);
+  for (int pos = 0; pos < 6; ++pos) CHECK(out[size_t(pos)] == table[size_t(pos / 4)] * 4 + pos % 4);
+  CHECK(cache.num_free_blocks() == free_before);
+  CHECK_THROWS_AS(cache.slots(table, 6, 9, out), InvalidArgument);  // 9 tokens need 3 blocks
+  CHECK_THROWS_AS(cache.slots(table, 4, 2, out), InvalidArgument);
+  CHECK_THROWS_AS(cache.slots(table, -1, 2, out), InvalidArgument);
+}
+
+TEST_CASE("truncate frees the blocks beyond a length") {
+  CpuBackend be(1);
+  PagedKVCache cache(be, small_config(4));
+  BlockTable table;
+  REQUIRE(cache.reserve(table, 12));
+  cache.truncate(table, 5);
+  CHECK(table.size() == 2);
+  CHECK(cache.num_free_blocks() == 2);
+  cache.truncate(table, 5);  // idempotent
+  CHECK(table.size() == 2);
+  cache.truncate(table, 0);
+  CHECK(table.empty());
+  CHECK(cache.num_free_blocks() == 4);
+  CHECK_THROWS_AS(cache.truncate(table, -1), InvalidArgument);
+}
+
 TEST_CASE("k_cache and v_cache are disjoint per-layer views") {
   CpuBackend be(1);
   const PagedKVCache cache(be, small_config(3));

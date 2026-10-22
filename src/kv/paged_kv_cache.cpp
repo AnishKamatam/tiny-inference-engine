@@ -38,22 +38,49 @@ PagedKVCache::PagedKVCache(Backend& backend, const KVCacheConfig& config)
   buffer_ = backend.alloc(bytes_per_block_ * static_cast<size_t>(pool_.num_blocks()));
 }
 
-void PagedKVCache::append_slots(BlockTable& table, int64_t old_len, int64_t new_len, std::vector<int32_t>& slots) {
+bool PagedKVCache::reserve(BlockTable& table, int64_t new_len) {
+  if (new_len < 0) fail<InvalidArgument>("cannot reserve KV blocks for {} tokens", new_len);
+  const int64_t needed = int64_t{blocks_for(new_len, config_.block_size)} - static_cast<int64_t>(table.size());
+  if (needed <= 0) return true;
+  if (needed > pool_.num_free()) return false;
+  table.reserve(table.size() + static_cast<size_t>(needed));  // so push_back cannot throw after a block is taken
+  for (int64_t i = 0; i < needed; ++i) table.push_back(pool_.allocate());
+  return true;
+}
+
+void PagedKVCache::slots(const BlockTable& table, int64_t old_len, int64_t new_len, std::vector<int32_t>& out) const {
+  const int32_t bs = config_.block_size;
+  if (old_len < 0 || new_len < old_len) fail<InvalidArgument>("bad token range [{}, {})", old_len, new_len);
+  if (blocks_for(new_len, bs) > static_cast<int64_t>(table.size())) {
+    fail<InvalidArgument>("block table of {} blocks cannot hold {} tokens", table.size(), new_len);
+  }
+  for (int64_t pos = old_len; pos < new_len; ++pos) {
+    out.push_back(table[static_cast<size_t>(pos / bs)] * bs + static_cast<int32_t>(pos % bs));
+  }
+}
+
+void PagedKVCache::truncate(BlockTable& table, int64_t len) {
+  if (len < 0) fail<InvalidArgument>("cannot truncate a block table to {} tokens", len);
+  const auto keep = static_cast<size_t>(blocks_for(len, config_.block_size));
+  while (table.size() > keep) {
+    pool_.release(table.back());
+    table.pop_back();
+  }
+}
+
+void PagedKVCache::append_slots(BlockTable& table, int64_t old_len, int64_t new_len, std::vector<int32_t>& slots_out) {
   const int32_t bs = config_.block_size;
   if (old_len < 0 || new_len < old_len) fail<InvalidArgument>("bad token range [{}, {})", old_len, new_len);
   if (static_cast<int64_t>(table.size()) != blocks_for(old_len, bs)) {
     fail<InvalidArgument>("block table has {} blocks but {} cached tokens need {}", table.size(), old_len,
                           blocks_for(old_len, bs));
   }
-  const int32_t needed = blocks_for(new_len, bs) - static_cast<int32_t>(table.size());
-  if (needed > pool_.num_free()) {
-    fail<CapacityError>("KV cache needs {} more blocks to hold {} tokens but only {} of {} are free", needed, new_len,
-                        pool_.num_free(), pool_.num_blocks());
+  if (!reserve(table, new_len)) {
+    fail<CapacityError>("KV cache needs {} more blocks to hold {} tokens but only {} of {} are free",
+                        blocks_for(new_len, bs) - static_cast<int32_t>(table.size()), new_len, pool_.num_free(),
+                        pool_.num_blocks());
   }
-  for (int32_t i = 0; i < needed; ++i) table.push_back(pool_.allocate());
-  for (int64_t pos = old_len; pos < new_len; ++pos) {
-    slots.push_back(table[static_cast<size_t>(pos / bs)] * bs + static_cast<int32_t>(pos % bs));
-  }
+  slots(table, old_len, new_len, slots_out);
 }
 
 void PagedKVCache::release(BlockTable& table) {
