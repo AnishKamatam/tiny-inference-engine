@@ -40,9 +40,8 @@ class Engine {
   // rejected, with CapacityError, before any compute. Otherwise the request is
   // accepted and its max_tokens is clamped to the most that fits all three, so it
   // runs until it finishes or reaches the capacity it can be given (FinishReason::Length).
-  // It cannot fail for capacity reasons mid-generation only because FcfsScheduler runs one
-  // sequence at a time against the whole KV pool; a scheduler that runs several sequences
-  // at once must reserve or preempt to keep that guarantee.
+  // It cannot fail for capacity reasons mid-generation: the scheduler reserves blocks before
+  // each step and, when several sequences run, preempts newer ones so the oldest can always grow.
   int32_t add_request(std::vector<int32_t> prompt, const SamplingParams& params);
   void step();
   bool has_work() const { return scheduler_->has_work(); }
@@ -58,6 +57,7 @@ class Engine {
   const EngineStats& stats() const { return stats_; }
 
  private:
+  void check_batch(const ScheduledBatch& batch) const;
   void finish(Sequence& seq, FinishReason reason);
 
   Qwen3Model& model_;

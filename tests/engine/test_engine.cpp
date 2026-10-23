@@ -14,77 +14,51 @@
 #include "kv/paged_kv_cache.h"
 #include "model/loader.h"
 #include "model/qwen3.h"
+#include "support/engine_rig.h"
 #include "support/test_data.h"
 #include "support/tiny_model.h"
 
 using namespace tie;
+using test::Rig;
+using test::prompt;
+using test::greedy;
 
 namespace {
-
-// A tiny model, its cache and an engine, wired the way the CLI wires the real one.
-struct Rig {
-  CpuBackend backend{2};
-  LoadedModel weights;
-  std::unique_ptr<Qwen3Model> model;
-  std::unique_ptr<PagedKVCache> cache;
-  std::unique_ptr<Engine> engine;
-
-  Rig(LoadedModel w, int32_t max_tokens_per_step, std::vector<int32_t> stop_tokens = {},
-      size_t kv_blocks = 256, DType kv_dtype = DType::F32, int32_t max_blocks_per_seq = 0, int32_t max_seqs = 1,
-      std::unique_ptr<Scheduler> scheduler = nullptr)
-      : weights(std::move(w)) {
-    const ModelConfig& c = weights.config;
-    KVCacheConfig kc;
-    kc.num_layers = int32_t(c.num_layers);
-    kc.num_kv_heads = int32_t(c.num_kv_heads);
-    kc.head_dim = int32_t(c.head_dim);
-    kc.block_size = 4;
-    kc.dtype = kv_dtype;
-    kc.budget_bytes = kv_blocks * 2 * size_t(c.num_layers * c.num_kv_heads * c.head_dim) * 4 * bytes_for(kv_dtype, 1);
-    cache = std::make_unique<PagedKVCache>(backend, kc);
-
-    const ServingConfig serving{max_tokens_per_step, max_seqs};
-    const int32_t blocks_per_seq =
-        max_blocks_per_seq > 0 ? max_blocks_per_seq : PagedKVCache::blocks_for(c.max_position_embeddings, kc.block_size);
-    model = std::make_unique<Qwen3Model>(backend, weights, model_limits(serving, blocks_per_seq));
-
-    EngineConfig ec;
-    ec.stop_tokens = std::move(stop_tokens);
-    if (!scheduler) scheduler = std::make_unique<FcfsScheduler>(max_tokens_per_step);
-    engine = std::make_unique<Engine>(*model, *cache, std::move(scheduler), serving, ec);
-  }
-};
-
-std::vector<int32_t> prompt(int n) {
-  std::vector<int32_t> ids;
-  for (int i = 0; i < n; ++i) ids.push_back((i * 5 + 1) % 64);
-  return ids;
-}
-
-SamplingParams greedy(int32_t max_tokens) {
-  SamplingParams p;
-  p.max_tokens = max_tokens;
-  return p;
-}
 
 // Test-only: runs every queued sequence in one step, each with all its pending tokens
 // (or a fixed, possibly invalid, token count), which FcfsScheduler never does.
 class AllAtOnceScheduler final : public Scheduler {
  public:
-  explicit AllAtOnceScheduler(int32_t forced_num_tokens = -1) : forced_num_tokens_(forced_num_tokens) {}
+  AllAtOnceScheduler(PagedKVCache& cache, int32_t forced_num_tokens = -1, bool reserve = true, bool duplicate = false)
+      : cache_(cache), forced_num_tokens_(forced_num_tokens), reserve_(reserve), duplicate_(duplicate) {}
   void add(Sequence* seq) override { seqs_.push_back(seq); }
   ScheduledBatch schedule() override {
     ScheduledBatch batch;
-    for (Sequence* seq : seqs_) batch.seqs.push_back({seq, forced_num_tokens_ >= 0 ? forced_num_tokens_ : seq->num_pending()});
+    batch.id = ++next_id_;
+    for (Sequence* seq : seqs_) {
+      const int32_t n = forced_num_tokens_ >= 0 ? forced_num_tokens_ : seq->num_pending();
+      if (reserve_) REQUIRE(cache_.reserve(seq->block_table, int64_t(seq->num_computed) + n));
+      batch.seqs.push_back({seq, n});
+      if (duplicate_) batch.seqs.push_back({seq, n});
+    }
     return batch;
   }
+  void complete(const ScheduledBatch&) override {}
+  void abandon(const ScheduledBatch&) override {}
   void finish(Sequence* seq) override { std::erase(seqs_, seq); }
   bool has_work() const override { return !seqs_.empty(); }
 
  private:
+  PagedKVCache& cache_;
   int32_t forced_num_tokens_;
+  bool reserve_, duplicate_;
+  uint64_t next_id_ = 0;
   std::vector<Sequence*> seqs_;
 };
+
+test::SchedulerFactory all_at_once(int32_t forced = -1, bool reserve = true, bool duplicate = false) {
+  return [=](PagedKVCache& cache) { return std::make_unique<AllAtOnceScheduler>(cache, forced, reserve, duplicate); };
+}
 
 }  // namespace
 
@@ -208,7 +182,7 @@ TEST_CASE("greedy generation on Metal starts exactly like HuggingFace") {
                    model_limits(serving, PagedKVCache::blocks_for(c.max_position_embeddings, kc.block_size)));
   EngineConfig ec;
   ec.stop_tokens = {151645, 151643};
-  Engine engine(model, cache, std::make_unique<FcfsScheduler>(64), serving, ec);
+  Engine engine(model, cache, std::make_unique<FcfsScheduler>(cache, 64), serving, ec);
 
   const std::vector<int32_t> got = engine.generate(prompt_ids, greedy(32));
   // "Three primary colors are" — half-precision prefill tiles may change a later near-tie.
@@ -247,7 +221,7 @@ TEST_CASE("a step whose forward fails rolls back its blocks and progress") {
   KVCacheConfig kc = rig.cache->config();
   kc.num_layers += 1;
   PagedKVCache wrong(rig.backend, kc);
-  Engine engine(*rig.model, wrong, std::make_unique<FcfsScheduler>(64), ServingConfig{64, 1});
+  Engine engine(*rig.model, wrong, std::make_unique<FcfsScheduler>(wrong, 64), ServingConfig{64, 1});
   const int32_t free_before = wrong.num_free_blocks();
   const int32_t id = engine.add_request(prompt(10), greedy(3));
   CHECK_THROWS_AS(engine.step(), InvalidArgument);
@@ -258,7 +232,7 @@ TEST_CASE("a step whose forward fails rolls back its blocks and progress") {
 }
 
 TEST_CASE("a failing token callback in a two-sequence step finishes both sequences") {
-  Rig rig(test::make_tiny_model(8), 64, {}, 256, DType::F32, 0, /*max_seqs=*/2, std::make_unique<AllAtOnceScheduler>());
+  Rig rig(test::make_tiny_model(8), 64, {}, 256, DType::F32, 0, /*max_seqs=*/2, all_at_once());
   const int32_t total = rig.cache->num_free_blocks();
   rig.engine->set_token_callback([](int32_t, int32_t) { throw std::runtime_error("callback failed"); });
   const int32_t a = rig.engine->add_request(prompt(6), greedy(4));
@@ -275,7 +249,7 @@ TEST_CASE("a failing token callback in a two-sequence step finishes both sequenc
 TEST_CASE("step rejects a scheduled token count the engine cannot run, before touching state") {
   for (int32_t bad : {0, 65}) {
     CAPTURE(bad);
-    Rig rig(test::make_tiny_model(9), 64, {}, 256, DType::F32, 0, 1, std::make_unique<AllAtOnceScheduler>(bad));
+    Rig rig(test::make_tiny_model(9), 64, {}, 256, DType::F32, 0, 1, all_at_once(bad));
     const int32_t total = rig.cache->num_free_blocks();
     const int32_t id = rig.engine->add_request(prompt(70), greedy(2));
     CHECK_THROWS_AS(rig.engine->step(), InvalidArgument);
@@ -290,7 +264,7 @@ TEST_CASE("generate cleans up its sequence when forward fails") {
   KVCacheConfig kc = rig.cache->config();
   kc.num_layers += 1;
   PagedKVCache wrong(rig.backend, kc);
-  Engine engine(*rig.model, wrong, std::make_unique<FcfsScheduler>(64), ServingConfig{64, 1});
+  Engine engine(*rig.model, wrong, std::make_unique<FcfsScheduler>(wrong, 64), ServingConfig{64, 1});
   const int32_t total = wrong.num_free_blocks();
   CHECK_THROWS_AS(engine.generate(prompt(10), greedy(3)), InvalidArgument);
   CHECK_FALSE(engine.has_work());
@@ -301,9 +275,44 @@ TEST_CASE("generate cleans up its sequence when forward fails") {
 TEST_CASE("the engine rejects a serving config the model was not sized for") {
   Rig rig(test::make_tiny_model(1), 64);  // model sized for 64 tokens and 1 sequence per step
   const auto build = [&](ServingConfig serving) {
-    Engine engine(*rig.model, *rig.cache, std::make_unique<FcfsScheduler>(serving.max_tokens_per_step), serving);
+    Engine engine(*rig.model, *rig.cache, std::make_unique<FcfsScheduler>(*rig.cache, serving.max_tokens_per_step), serving);
   };
   CHECK_NOTHROW(build(ServingConfig{32, 1}));
   CHECK_THROWS_WITH_AS(build(ServingConfig{128, 1}), doctest::Contains("exceeds the model"), InvalidArgument);
   CHECK_THROWS_WITH_AS(build(ServingConfig{64, 2}), doctest::Contains("exceeds the model"), InvalidArgument);
+}
+
+TEST_CASE("step rejects a batch whose KV blocks were not reserved, or that repeats a sequence") {
+  for (bool duplicate : {false, true}) {
+    CAPTURE(duplicate);
+    Rig rig(test::make_tiny_model(10), 64, {}, 256, DType::F32, 0, /*max_seqs=*/2,
+            all_at_once(-1, /*reserve=*/duplicate, duplicate));
+    const int32_t total = rig.cache->num_free_blocks();
+    const int32_t id = rig.engine->add_request(prompt(9), greedy(2));
+    CHECK_THROWS_WITH_AS(rig.engine->step(), doctest::Contains(duplicate ? "twice" : "KV blocks"), InvalidArgument);
+    CHECK(rig.engine->sequence(id).num_computed == 0);
+    CHECK(rig.cache->num_free_blocks() == total);
+  }
+}
+
+TEST_CASE("a forward failure abandons the batch so the scheduler offers it again") {
+  Rig rig(test::make_tiny_model(7), 64);
+  KVCacheConfig kc = rig.cache->config();
+  kc.num_layers += 1;
+  PagedKVCache wrong(rig.backend, kc);
+  Engine engine(*rig.model, wrong, std::make_unique<FcfsScheduler>(wrong, 64), ServingConfig{64, 1});
+  engine.add_request(prompt(10), greedy(3));
+  CHECK_THROWS_AS(engine.step(), InvalidArgument);
+  CHECK_THROWS_AS(engine.step(), InvalidArgument);  // rescheduled, not silently dropped
+}
+
+TEST_CASE("step rejects a batch with more sequences than the serving config allows") {
+  Rig rig(test::make_tiny_model(11), 64, {}, 256, DType::F32, 0, /*max_seqs=*/1, all_at_once());
+  const int32_t total = rig.cache->num_free_blocks();
+  const int32_t a = rig.engine->add_request(prompt(6), greedy(2));
+  const int32_t b = rig.engine->add_request(prompt(5), greedy(2));
+  CHECK_THROWS_WITH_AS(rig.engine->step(), doctest::Contains("a step allows at most"), InvalidArgument);
+  CHECK(rig.cache->num_free_blocks() == total);
+  CHECK(rig.engine->sequence(a).block_table.empty());
+  CHECK(rig.engine->sequence(b).block_table.empty());
 }

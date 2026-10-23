@@ -62,16 +62,38 @@ int32_t Engine::add_request(std::vector<int32_t> prompt, const SamplingParams& p
   return id;
 }
 
+void Engine::check_batch(const ScheduledBatch& batch) const {
+  if (static_cast<int64_t>(batch.seqs.size()) > serving_.max_seqs) {
+    fail<InvalidArgument>("scheduler gave {} sequences; a step allows at most {}", batch.seqs.size(), serving_.max_seqs);
+  }
+  int64_t total = 0;
+  for (size_t i = 0; i < batch.seqs.size(); ++i) {
+    const ScheduledSeq& s = batch.seqs[i];
+    const Sequence& seq = *s.seq;
+    if (s.num_tokens <= 0 || s.num_tokens > seq.num_pending()) {
+      fail<InvalidArgument>("scheduler gave sequence {} {} tokens; it has {} pending", seq.id, s.num_tokens,
+                            seq.num_pending());
+    }
+    for (size_t j = 0; j < i; ++j) {
+      if (batch.seqs[j].seq == s.seq) fail<InvalidArgument>("scheduler gave sequence {} twice in one step", seq.id);
+    }
+    const int64_t end = int64_t{seq.num_computed} + s.num_tokens;
+    const auto blocks = static_cast<int64_t>(seq.block_table.size());
+    if (blocks < PagedKVCache::blocks_for(end, cache_.block_size()) || blocks > model_.limits().max_blocks_per_seq) {
+      fail<InvalidArgument>("sequence {} has {} KV blocks reserved; {} tokens need {} and a row holds at most {}", seq.id,
+                            blocks, end, PagedKVCache::blocks_for(end, cache_.block_size()),
+                            model_.limits().max_blocks_per_seq);
+    }
+    total += s.num_tokens;
+  }
+  if (total > serving_.max_tokens_per_step) {
+    fail<InvalidArgument>("scheduler gave {} tokens; a step allows at most {}", total, serving_.max_tokens_per_step);
+  }
+}
+
 void Engine::step() {
   const ScheduledBatch batch = scheduler_->schedule();
   if (batch.empty()) return;
-  // A scheduler bug must fail loudly here, before any block is reserved or progress recorded.
-  for (const ScheduledSeq& s : batch.seqs) {
-    if (s.num_tokens <= 0 || s.num_tokens > serving_.max_tokens_per_step || s.num_tokens > s.seq->num_pending()) {
-      fail<InvalidArgument>("scheduler gave sequence {} {} tokens; it has {} pending and a step allows at most {}",
-                            s.seq->id, s.num_tokens, s.seq->num_pending(), serving_.max_tokens_per_step);
-    }
-  }
 
   for (auto* v : {&tokens_, &positions_, &slots_, &query_start_, &context_lens_, &block_tables_, &logit_rows_}) v->clear();
   sampled_.clear();
@@ -81,11 +103,13 @@ void Engine::step() {
   query_start_.push_back(0);
 
   try {
+    // A scheduler bug must fail loudly here, before any compute or progress is recorded.
+    check_batch(batch);
     for (const ScheduledSeq& s : batch.seqs) {
       Sequence& seq = *s.seq;
       const int32_t begin = seq.num_computed;
       const int32_t end = begin + s.num_tokens;
-      cache_.append_slots(seq.block_table, begin, end, slots_);
+      cache_.slots(seq.block_table, begin, end, slots_);
       tokens_.insert(tokens_.end(), seq.tokens.begin() + begin, seq.tokens.begin() + end);
       for (int32_t p = begin; p < end; ++p) positions_.push_back(p);
       rows += s.num_tokens;
@@ -108,19 +132,14 @@ void Engine::step() {
     (has_prefill ? stats_.prefill_tokens : stats_.decode_tokens) += static_cast<int64_t>(tokens_.size());
     (has_prefill ? stats_.prefill_seconds : stats_.decode_seconds) += seconds;
   } catch (...) {
-    // Give back blocks reserved for a step that never ran, so the engine stays consistent.
-    for (const ScheduledSeq& s : batch.seqs) {
-      BlockTable& table = s.seq->block_table;
-      const auto keep = static_cast<size_t>(PagedKVCache::blocks_for(s.seq->num_computed, cache_.block_size()));
-      while (table.size() > keep) {
-        cache_.pool().release(table.back());
-        table.pop_back();
-      }
-    }
+    // The step never ran: give back what the scheduler reserved for it, and let it be scheduled again.
+    for (const ScheduledSeq& s : batch.seqs) cache_.truncate(s.seq->block_table, s.seq->num_computed);
+    scheduler_->abandon(batch);
     throw;
   }
 
   for (const ScheduledSeq& s : batch.seqs) s.seq->num_computed += s.num_tokens;
+  scheduler_->complete(batch);
 
   const auto vocab = static_cast<size_t>(model_.config().vocab_size);
   for (size_t i = 0; i < sampled_.size(); ++i) {
