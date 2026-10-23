@@ -112,6 +112,7 @@ add_executable(tie_tests
   tests/engine/test_batch_scheduler.cpp
   tests/engine/test_batch_scheduler_sim.cpp
   tests/engine/test_engine.cpp
+  tests/engine/test_engine_batching.cpp
   tests/engine/test_serving_config.cpp
   tests/kv/test_block_pool.cpp
   tests/kv/test_paged_kv_cache.cpp
