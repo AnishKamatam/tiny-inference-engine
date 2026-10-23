@@ -60,6 +60,7 @@ add_library(tie_core STATIC
   src/core/tensor.cpp
   src/core/thread_pool.cpp
   src/engine/engine.cpp
+  src/engine/batch_scheduler.cpp
   src/engine/scheduler.cpp
   src/engine/serving_config.cpp
   src/kernels/cpu/q8_0.cpp
@@ -109,6 +110,7 @@ add_executable(tie_tests
   tests/core/test_dtype.cpp
   tests/core/test_tensor.cpp
   tests/core/test_thread_pool.cpp
+  tests/engine/test_batch_scheduler.cpp
   tests/engine/test_engine.cpp
   tests/engine/test_scheduler.cpp
   tests/engine/test_serving_config.cpp

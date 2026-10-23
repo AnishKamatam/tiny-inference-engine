@@ -22,6 +22,8 @@ struct Sequence {
   std::mt19937_64 rng;
   SeqState state = SeqState::Waiting;
   FinishReason finish_reason = FinishReason::None;
+  int64_t waiting_since_step = 0;  // scheduler step at which it last entered the waiting queue
+  int32_t num_preemptions = 0;     // times its blocks were taken back and its tokens recomputed
 
   int32_t num_generated() const { return static_cast<int32_t>(tokens.size()) - prompt_len; }
   int32_t num_pending() const { return static_cast<int32_t>(tokens.size()) - num_computed; }
