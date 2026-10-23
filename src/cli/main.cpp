@@ -74,10 +74,11 @@ int run_generate(const tie::GenerateOptions& opt) {
 
   StreamDecoder decoder(tokenizer);
   const auto gen_start = Clock::now();
-  double ttft = 0.0;
+  double ttft = 0.0, last_token = 0.0;
   size_t generated = 0;
   engine.set_token_callback([&](int32_t, int32_t token) {
     if (generated++ == 0) ttft = seconds_since(gen_start);
+    last_token = seconds_since(gen_start);
     const auto& stops = engine_config.stop_tokens;
     if (std::find(stops.begin(), stops.end(), token) == stops.end()) write(decoder.push(token));
   });
@@ -96,13 +97,13 @@ int run_generate(const tie::GenerateOptions& opt) {
   const int32_t effective_max_tokens = engine.sequence(seq_id).params.max_tokens;
   engine.release(seq_id);
 
-  const EngineStats& s = engine.stats();
+  const double prefill_rate = ttft > 0 ? double(prompt.size()) / ttft : 0.0;
+  const double decode_rate = generated > 1 && last_token > ttft ? double(generated - 1) / (last_token - ttft) : 0.0;
   std::fprintf(stderr,
                "\n[tie] %s | load %.2f s | prompt %zu tok | ttft %.0f ms | prefill %.1f tok/s | decode %.1f tok/s | "
                "%zu tok generated | kv %d blocks for %zu tok, pool %d blocks (%.2f GiB)\n",
                opt.device.c_str(), load_seconds, prompt.size(), ttft * 1e3,
-               s.prefill_seconds > 0 ? double(s.prefill_tokens) / s.prefill_seconds : 0.0,
-               s.decode_seconds > 0 ? double(s.decode_tokens) / s.decode_seconds : 0.0, generated,
+               prefill_rate, decode_rate, generated,
                PagedKVCache::blocks_for(static_cast<int64_t>(prompt.size() + generated), kv.block_size),
                prompt.size() + generated, cache.num_blocks(),
                double(cache.bytes_per_block()) * cache.num_blocks() / double(size_t{1} << 30));

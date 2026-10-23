@@ -92,14 +92,20 @@ void Engine::check_batch(const ScheduledBatch& batch) const {
 }
 
 void Engine::step() {
+  if (stepping_) fail<InvalidArgument>("step() called during a step (e.g. from a token callback)");
   const ScheduledBatch batch = scheduler_->schedule();
   if (batch.empty()) return;
+  stepping_ = true;
+  struct StepGuard {
+    bool& flag;
+    ~StepGuard() { flag = false; }
+  } guard{stepping_};
 
   for (auto* v : {&tokens_, &positions_, &slots_, &query_start_, &context_lens_, &block_tables_, &logit_rows_}) v->clear();
   sampled_.clear();
   const int32_t stride = model_.limits().max_blocks_per_seq;
-  bool has_prefill = false;
   int32_t rows = 0;
+  int64_t prefill_tokens = 0, decode_tokens = 0;
   query_start_.push_back(0);
 
   try {
@@ -112,6 +118,10 @@ void Engine::step() {
       cache_.slots(seq.block_table, begin, end, slots_);
       tokens_.insert(tokens_.end(), seq.tokens.begin() + begin, seq.tokens.begin() + end);
       for (int32_t p = begin; p < end; ++p) positions_.push_back(p);
+      // A decode is the single newest token of a sequence that was already decoding; a prompt chunk, or
+      // tokens recomputed after preemption (the scheduler marks those Prefilling), is prefill.
+      const bool decode = seq.state == SeqState::Decoding && s.num_tokens == 1;
+      (decode ? decode_tokens : prefill_tokens) += s.num_tokens;
       rows += s.num_tokens;
       query_start_.push_back(rows);
       context_lens_.push_back(end);
@@ -122,15 +132,17 @@ void Engine::step() {
         logit_rows_.push_back(rows - 1);
         sampled_.push_back(&seq);
       }
-      has_prefill |= begin < seq.prompt_len;
     }
 
     const auto start = std::chrono::steady_clock::now();
     model_.forward(BatchInput{tokens_, positions_, slots_, query_start_, context_lens_, block_tables_, logit_rows_}, cache_,
                    logits_);
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-    (has_prefill ? stats_.prefill_tokens : stats_.decode_tokens) += static_cast<int64_t>(tokens_.size());
-    (has_prefill ? stats_.prefill_seconds : stats_.decode_seconds) += seconds;
+    ++stats_.steps;
+    stats_.seqs_scheduled += static_cast<int64_t>(batch.seqs.size());
+    stats_.prefill_tokens += prefill_tokens;
+    stats_.decode_tokens += decode_tokens;
+    stats_.step_seconds += seconds;
   } catch (...) {
     // The step never ran: give back what the scheduler reserved for it, and let it be scheduled again.
     for (const ScheduledSeq& s : batch.seqs) cache_.truncate(s.seq->block_table, s.seq->num_computed);
@@ -144,6 +156,7 @@ void Engine::step() {
   const auto vocab = static_cast<size_t>(model_.config().vocab_size);
   for (size_t i = 0; i < sampled_.size(); ++i) {
     Sequence& seq = *sampled_[i];
+    if (seq.state == SeqState::Finished) continue;  // cancelled by an earlier token callback of this step
     int32_t token = 0;
     try {
       token = sampler_.sample(std::span(logits_).subspan(i * vocab, vocab), seq.params, seq.rng);
@@ -159,6 +172,7 @@ void Engine::step() {
       }
       throw;
     }
+    if (seq.state == SeqState::Finished) continue;  // its own callback cancelled it
     if (std::ranges::find(config_.stop_tokens, token) != config_.stop_tokens.end()) {
       finish(seq, FinishReason::Stop);
     } else if (seq.num_generated() >= seq.params.max_tokens) {
@@ -180,7 +194,25 @@ const Sequence& Engine::sequence(int32_t id) const {
   return *it->second;
 }
 
+Sequence& Engine::get(int32_t id) {
+  const auto it = sequences_.find(id);
+  if (it == sequences_.end()) fail<InvalidArgument>("no sequence with id {}", id);
+  return *it->second;
+}
+
+void Engine::cancel(int32_t id) {
+  Sequence& seq = get(id);
+  if (seq.state != SeqState::Finished) finish(seq, FinishReason::Cancelled);
+}
+
+EngineStats Engine::stats() const {
+  EngineStats s = stats_;
+  s.preemptions = scheduler_->num_preemptions();
+  return s;
+}
+
 void Engine::release(int32_t id) {
+  if (stepping_) fail<InvalidArgument>("cannot release sequence {} during a step", id);
   if (sequence(id).state != SeqState::Finished) fail<InvalidArgument>("sequence {} is still running", id);
   sequences_.erase(id);
 }

@@ -10,7 +10,7 @@
 namespace tie {
 
 enum class SeqState { Waiting, Prefilling, Decoding, Finished };
-enum class FinishReason { None, Stop, Length, Error };
+enum class FinishReason { None, Stop, Length, Error, Cancelled };
 
 struct Sequence {
   int32_t id = 0;

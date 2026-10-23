@@ -20,10 +20,12 @@ struct EngineConfig {
 };
 
 struct EngineStats {
-  int64_t prefill_tokens = 0;
-  double prefill_seconds = 0.0;
+  int64_t steps = 0;
+  int64_t seqs_scheduled = 0;  // summed over steps; divided by steps it is the mean batch size
+  int64_t prefill_tokens = 0;  // prompt tokens, and tokens recomputed after preemption
   int64_t decode_tokens = 0;
-  double decode_seconds = 0.0;
+  double step_seconds = 0.0;   // time in the model's forward pass
+  int64_t preemptions = 0;
 };
 
 using TokenCallback = std::function<void(int32_t seq_id, int32_t token)>;
@@ -47,18 +49,23 @@ class Engine {
   bool has_work() const { return scheduler_->has_work(); }
 
   const Sequence& sequence(int32_t id) const;
-  void release(int32_t id);  // forget a finished sequence
+  void release(int32_t id);  // forget a finished sequence; not allowed during step() (e.g. from a token callback)
+
+  // Finishes a waiting, running or preempted request with FinishReason::Cancelled and frees its
+  // blocks; a no-op for a finished one. Safe from a token callback.
+  void cancel(int32_t id);
 
   // Runs one request to completion and returns its generated tokens, including
   // the stop token that ended it, if any.
   std::vector<int32_t> generate(std::vector<int32_t> prompt, const SamplingParams& params);
 
   void set_token_callback(TokenCallback callback) { on_token_ = std::move(callback); }
-  const EngineStats& stats() const { return stats_; }
+  EngineStats stats() const;
 
  private:
   void check_batch(const ScheduledBatch& batch) const;
   void finish(Sequence& seq, FinishReason reason);
+  Sequence& get(int32_t id);
 
   Qwen3Model& model_;
   PagedKVCache& cache_;
@@ -70,6 +77,7 @@ class Engine {
   EngineStats stats_;
   std::unordered_map<int32_t, std::unique_ptr<Sequence>> sequences_;
   int32_t next_id_ = 0;
+  bool stepping_ = false;
 
   // Step scratch, reused so steady-state decoding does not allocate.
   std::vector<int32_t> tokens_, positions_, slots_, query_start_, context_lens_, block_tables_, logit_rows_;

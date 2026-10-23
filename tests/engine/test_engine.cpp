@@ -316,3 +316,158 @@ TEST_CASE("step rejects a batch with more sequences than the serving config allo
   CHECK(rig.engine->sequence(a).block_table.empty());
   CHECK(rig.engine->sequence(b).block_table.empty());
 }
+
+TEST_CASE("cancel finishes a waiting or running request, frees its blocks and lets others finish") {
+  Rig rig(test::make_tiny_model(11), 64, {}, 256, DType::F32, 0, /*max_seqs=*/1);
+  const int32_t total = rig.cache->num_free_blocks();
+  const int32_t a = rig.engine->add_request(prompt(6), greedy(5));
+  const int32_t b = rig.engine->add_request(prompt(5), greedy(3));
+  const int32_t c = rig.engine->add_request(prompt(4), greedy(2));
+  rig.engine->step();  // a runs; b and c wait (one sequence at a time)
+  rig.engine->cancel(b);
+  rig.engine->cancel(a);
+  CHECK(rig.engine->sequence(a).finish_reason == FinishReason::Cancelled);
+  CHECK(rig.engine->sequence(b).finish_reason == FinishReason::Cancelled);
+  while (rig.engine->has_work()) rig.engine->step();
+  CHECK(rig.engine->sequence(c).finish_reason == FinishReason::Length);
+  CHECK(rig.cache->num_free_blocks() == total);
+  rig.engine->cancel(c);  // finished: no-op
+  CHECK(rig.engine->sequence(c).finish_reason == FinishReason::Length);
+  CHECK_THROWS_AS(rig.engine->cancel(99), InvalidArgument);
+}
+
+TEST_CASE("a token callback may cancel sequences of the same step but not release them") {
+  Rig rig(test::make_tiny_model(12), 64, {}, 256, DType::F32, 0, /*max_seqs=*/2);
+  const int32_t total = rig.cache->num_free_blocks();
+  const int32_t a = rig.engine->add_request(prompt(6), greedy(4));
+  const int32_t b = rig.engine->add_request(prompt(5), greedy(4));
+  bool tried_release = false;
+  rig.engine->set_token_callback([&](int32_t id, int32_t) {
+    if (id != a) return;
+    rig.engine->cancel(b);  // b samples later in this same step
+    rig.engine->cancel(a);  // and a cancels itself
+    CHECK_THROWS_AS(rig.engine->release(b), InvalidArgument);
+    tried_release = true;
+  });
+  rig.engine->step();  // both prefill and sample in one step
+  CHECK(tried_release);
+  CHECK(rig.engine->sequence(a).finish_reason == FinishReason::Cancelled);
+  CHECK(rig.engine->sequence(a).num_generated() == 1);
+  CHECK(rig.engine->sequence(b).finish_reason == FinishReason::Cancelled);
+  CHECK(rig.engine->sequence(b).num_generated() == 0);  // never sampled after the cancel
+  CHECK(rig.cache->num_free_blocks() == total);
+  CHECK_FALSE(rig.engine->has_work());
+}
+
+TEST_CASE("stats count steps, batch sizes, prefill and decode tokens") {
+  Rig rig(test::make_tiny_model(13), 64, {}, 256, DType::F32, 0, /*max_seqs=*/2);
+  rig.engine->add_request(prompt(10), greedy(3));
+  rig.engine->add_request(prompt(4), greedy(2));
+  while (rig.engine->has_work()) rig.engine->step();
+  const EngineStats s = rig.engine->stats();
+  CHECK(s.steps == 3);           // both prefill together, then two decode steps for the first
+  CHECK(s.seqs_scheduled == 5);  // 2 + 2 + 1
+  CHECK(s.prefill_tokens == 14);
+  CHECK(s.decode_tokens == 3);
+  CHECK(s.step_seconds > 0.0);
+  CHECK(s.preemptions == 0);
+}
+
+TEST_CASE("step() called from a token callback is refused and the batch ends in a defined state") {
+  Rig rig(test::make_tiny_model(14), 64, {}, 256, DType::F32, 0, /*max_seqs=*/2);
+  const int32_t total = rig.cache->num_free_blocks();
+  const int32_t a = rig.engine->add_request(prompt(6), greedy(4));
+  const int32_t b = rig.engine->add_request(prompt(5), greedy(4));
+  rig.engine->step();  // both prefill; a and b are decoding
+  REQUIRE(rig.engine->sequence(a).state == SeqState::Decoding);
+  REQUIRE(rig.engine->sequence(b).state == SeqState::Decoding);
+  bool refused = false;
+  rig.engine->set_token_callback([&](int32_t id, int32_t) {
+    if (id != a) return;
+    try {
+      rig.engine->step();
+    } catch (const InvalidArgument&) {
+      refused = true;
+      throw;  // a callback that fails takes the step down with it
+    }
+  });
+  CHECK_THROWS_AS(rig.engine->step(), InvalidArgument);
+  CHECK(refused);
+  // The failed callback finishes its sequence and those after it with Error; nothing is stuck.
+  CHECK(rig.engine->sequence(a).finish_reason == FinishReason::Error);
+  CHECK(rig.engine->sequence(b).finish_reason == FinishReason::Error);
+  CHECK(rig.cache->num_free_blocks() == total);
+  CHECK_FALSE(rig.engine->has_work());
+  rig.engine->release(a);  // the step is over, so release works again
+  rig.engine->release(b);
+}
+
+TEST_CASE("add_request from a token callback is allowed") {
+  Rig rig(test::make_tiny_model(15), 64, {}, 256, DType::F32, 0, /*max_seqs=*/2);
+  int32_t added = -1;
+  rig.engine->set_token_callback([&](int32_t, int32_t) {
+    if (added < 0) added = rig.engine->add_request(prompt(3), greedy(2));
+  });
+  rig.engine->add_request(prompt(5), greedy(2));
+  while (rig.engine->has_work()) rig.engine->step();
+  REQUIRE(added >= 0);
+  CHECK(rig.engine->sequence(added).finish_reason == FinishReason::Length);
+}
+
+TEST_CASE("cancel frees a partially prefilled sequence") {
+  Rig rig(test::make_tiny_model(16), 4, {}, 256, DType::F32, 0, /*max_seqs=*/1);
+  const int32_t total = rig.cache->num_free_blocks();
+  const int32_t a = rig.engine->add_request(prompt(10), greedy(3));
+  rig.engine->step();  // 4 of 10 prompt tokens
+  REQUIRE(rig.engine->sequence(a).state == SeqState::Prefilling);
+  REQUIRE(rig.engine->sequence(a).num_computed == 4);
+  rig.engine->cancel(a);
+  CHECK(rig.engine->sequence(a).finish_reason == FinishReason::Cancelled);
+  CHECK(rig.cache->num_free_blocks() == total);
+  CHECK_FALSE(rig.engine->has_work());
+  const int32_t b = rig.engine->add_request(prompt(4), greedy(2));
+  while (rig.engine->has_work()) rig.engine->step();
+  CHECK(rig.engine->sequence(b).finish_reason == FinishReason::Length);
+}
+
+TEST_CASE("a callback that cancels itself and then throws leaves no leak and keeps earlier cancels") {
+  Rig rig(test::make_tiny_model(17), 64, {}, 256, DType::F32, 0, /*max_seqs=*/3);
+  const int32_t total = rig.cache->num_free_blocks();
+  const int32_t a = rig.engine->add_request(prompt(6), greedy(4));
+  const int32_t b = rig.engine->add_request(prompt(5), greedy(4));
+  const int32_t c = rig.engine->add_request(prompt(4), greedy(4));
+  rig.engine->set_token_callback([&](int32_t id, int32_t) {
+    if (id != a) return;
+    rig.engine->cancel(b);
+    rig.engine->cancel(a);
+    throw std::runtime_error("callback failed");
+  });
+  CHECK_THROWS_AS(rig.engine->step(), std::runtime_error);
+  CHECK(rig.engine->sequence(a).finish_reason == FinishReason::Cancelled);
+  CHECK(rig.engine->sequence(b).finish_reason == FinishReason::Cancelled);
+  CHECK(rig.engine->sequence(c).finish_reason == FinishReason::Error);
+  CHECK(rig.cache->num_free_blocks() == total);
+  CHECK_FALSE(rig.engine->has_work());
+}
+
+TEST_CASE("stats count preemptions, and recomputed tokens as prefill even when the last chunk is one token") {
+  // A 4-block pool and 4 tokens per step force a preemption whose recompute ends in a one-token chunk
+  // (found by sweeping pool, budget and prompt sizes). A sequence that was already decoding is preempted, so its
+  // next token comes from the end of the recompute (prefill), not from a decode step.
+  Rig rig(test::make_tiny_model(18), 4, {}, /*kv_blocks=*/4, DType::F32, 0, /*max_seqs=*/2);
+  const int32_t a = rig.engine->add_request(prompt(5), greedy(5));
+  const int32_t b = rig.engine->add_request(prompt(6), greedy(5));
+  bool one_token_recompute = false;  // pins the scenario, so the test cannot pass without exercising it
+  while (rig.engine->has_work()) {
+    const int64_t prefill_before = rig.engine->stats().prefill_tokens;
+    rig.engine->step();
+    one_token_recompute |= rig.engine->stats().prefill_tokens - prefill_before == 1;
+  }
+  CHECK(one_token_recompute);
+  const EngineStats s = rig.engine->stats();
+  CHECK(s.preemptions > 0);
+  CHECK(s.preemptions == rig.engine->sequence(a).num_preemptions + rig.engine->sequence(b).num_preemptions);
+  CHECK(rig.engine->sequence(a).num_generated() + rig.engine->sequence(b).num_generated() == 10);
+  // 8 tokens follow the first of each sequence; the preemption turned one of those decodes into a recompute's sample.
+  CHECK(s.decode_tokens == 7);
+}
