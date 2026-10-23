@@ -61,6 +61,7 @@ add_library(tie_core STATIC
   src/core/thread_pool.cpp
   src/engine/engine.cpp
   src/engine/scheduler.cpp
+  src/engine/serving_config.cpp
   src/kernels/cpu/q8_0.cpp
   src/kernels/cpu/vec.cpp
   src/kv/block_pool.cpp
@@ -110,6 +111,7 @@ add_executable(tie_tests
   tests/core/test_thread_pool.cpp
   tests/engine/test_engine.cpp
   tests/engine/test_scheduler.cpp
+  tests/engine/test_serving_config.cpp
   tests/kv/test_block_pool.cpp
   tests/kv/test_paged_kv_cache.cpp
   tests/model/test_config.cpp

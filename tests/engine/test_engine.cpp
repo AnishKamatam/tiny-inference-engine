@@ -43,19 +43,15 @@ struct Rig {
     kc.budget_bytes = kv_blocks * 2 * size_t(c.num_layers * c.num_kv_heads * c.head_dim) * 4 * bytes_for(kv_dtype, 1);
     cache = std::make_unique<PagedKVCache>(backend, kc);
 
-    ModelLimits limits;
-    limits.max_tokens_per_step = max_tokens_per_step;
-    limits.max_blocks_per_seq =
+    const ServingConfig serving{max_tokens_per_step, max_seqs};
+    const int32_t blocks_per_seq =
         max_blocks_per_seq > 0 ? max_blocks_per_seq : PagedKVCache::blocks_for(c.max_position_embeddings, kc.block_size);
-    limits.max_seqs = max_seqs;
-    limits.max_logit_rows = max_seqs;
-    model = std::make_unique<Qwen3Model>(backend, weights, limits);
+    model = std::make_unique<Qwen3Model>(backend, weights, model_limits(serving, blocks_per_seq));
 
     EngineConfig ec;
-    ec.max_tokens_per_step = max_tokens_per_step;
     ec.stop_tokens = std::move(stop_tokens);
     if (!scheduler) scheduler = std::make_unique<FcfsScheduler>(max_tokens_per_step);
-    engine = std::make_unique<Engine>(*model, *cache, std::move(scheduler), ec);
+    engine = std::make_unique<Engine>(*model, *cache, std::move(scheduler), serving, ec);
   }
 };
 
@@ -207,14 +203,12 @@ TEST_CASE("greedy generation on Metal starts exactly like HuggingFace") {
   kc.head_dim = int32_t(c.head_dim);
   kc.budget_bytes = size_t{256} << 20;
   PagedKVCache cache(metal, kc);
-  ModelLimits limits;
-  limits.max_tokens_per_step = 64;
-  limits.max_blocks_per_seq = PagedKVCache::blocks_for(c.max_position_embeddings, kc.block_size);
-  Qwen3Model model(metal, weights, limits);
+  const ServingConfig serving{64, 1};
+  Qwen3Model model(metal, weights,
+                   model_limits(serving, PagedKVCache::blocks_for(c.max_position_embeddings, kc.block_size)));
   EngineConfig ec;
-  ec.max_tokens_per_step = 64;
   ec.stop_tokens = {151645, 151643};
-  Engine engine(model, cache, std::make_unique<FcfsScheduler>(64), ec);
+  Engine engine(model, cache, std::make_unique<FcfsScheduler>(64), serving, ec);
 
   const std::vector<int32_t> got = engine.generate(prompt_ids, greedy(32));
   // "Three primary colors are" — half-precision prefill tiles may change a later near-tie.
@@ -253,9 +247,7 @@ TEST_CASE("a step whose forward fails rolls back its blocks and progress") {
   KVCacheConfig kc = rig.cache->config();
   kc.num_layers += 1;
   PagedKVCache wrong(rig.backend, kc);
-  EngineConfig ec;
-  ec.max_tokens_per_step = 64;
-  Engine engine(*rig.model, wrong, std::make_unique<FcfsScheduler>(64), ec);
+  Engine engine(*rig.model, wrong, std::make_unique<FcfsScheduler>(64), ServingConfig{64, 1});
   const int32_t free_before = wrong.num_free_blocks();
   const int32_t id = engine.add_request(prompt(10), greedy(3));
   CHECK_THROWS_AS(engine.step(), InvalidArgument);
@@ -298,12 +290,20 @@ TEST_CASE("generate cleans up its sequence when forward fails") {
   KVCacheConfig kc = rig.cache->config();
   kc.num_layers += 1;
   PagedKVCache wrong(rig.backend, kc);
-  EngineConfig ec;
-  ec.max_tokens_per_step = 64;
-  Engine engine(*rig.model, wrong, std::make_unique<FcfsScheduler>(64), ec);
+  Engine engine(*rig.model, wrong, std::make_unique<FcfsScheduler>(64), ServingConfig{64, 1});
   const int32_t total = wrong.num_free_blocks();
   CHECK_THROWS_AS(engine.generate(prompt(10), greedy(3)), InvalidArgument);
   CHECK_FALSE(engine.has_work());
   CHECK(wrong.num_free_blocks() == total);
   CHECK_THROWS_AS(engine.sequence(0), InvalidArgument);  // the failed request is no longer registered
+}
+
+TEST_CASE("the engine rejects a serving config the model was not sized for") {
+  Rig rig(test::make_tiny_model(1), 64);  // model sized for 64 tokens and 1 sequence per step
+  const auto build = [&](ServingConfig serving) {
+    Engine engine(*rig.model, *rig.cache, std::make_unique<FcfsScheduler>(serving.max_tokens_per_step), serving);
+  };
+  CHECK_NOTHROW(build(ServingConfig{32, 1}));
+  CHECK_THROWS_WITH_AS(build(ServingConfig{128, 1}), doctest::Contains("exceeds the model"), InvalidArgument);
+  CHECK_THROWS_WITH_AS(build(ServingConfig{64, 2}), doctest::Contains("exceeds the model"), InvalidArgument);
 }

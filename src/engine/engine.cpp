@@ -8,14 +8,18 @@
 
 namespace tie {
 
-Engine::Engine(Qwen3Model& model, PagedKVCache& cache, std::unique_ptr<Scheduler> scheduler, EngineConfig config)
-    : model_(model), cache_(cache), scheduler_(std::move(scheduler)), config_(std::move(config)) {
-  if (config_.max_tokens_per_step > model_.limits().max_tokens_per_step) {
-    fail<InvalidArgument>("engine step size {} exceeds the model's limit of {}", config_.max_tokens_per_step,
-                          model_.limits().max_tokens_per_step);
-  }
-  if (model_.limits().max_logit_rows < model_.limits().max_seqs) {
-    fail<InvalidArgument>("the model must allow one logit row per sequence");
+Engine::Engine(Qwen3Model& model, PagedKVCache& cache, std::unique_ptr<Scheduler> scheduler, ServingConfig serving,
+               EngineConfig config)
+    : model_(model), cache_(cache), scheduler_(std::move(scheduler)), serving_(serving), config_(std::move(config)) {
+  validate(serving_);
+  const ModelLimits& limits = model_.limits();
+  if (limits.max_tokens_per_step < serving_.max_tokens_per_step || limits.max_seqs < serving_.max_seqs ||
+      limits.max_logit_rows < serving_.max_seqs) {
+    fail<InvalidArgument>(
+        "serving config ({} tokens, {} sequences per step) exceeds the model limits ({} tokens, {} sequences, {} logit "
+        "rows)",
+        serving_.max_tokens_per_step, serving_.max_seqs, limits.max_tokens_per_step, limits.max_seqs,
+        limits.max_logit_rows);
   }
 }
 
@@ -63,9 +67,9 @@ void Engine::step() {
   if (batch.empty()) return;
   // A scheduler bug must fail loudly here, before any block is reserved or progress recorded.
   for (const ScheduledSeq& s : batch.seqs) {
-    if (s.num_tokens <= 0 || s.num_tokens > config_.max_tokens_per_step || s.num_tokens > s.seq->num_pending()) {
+    if (s.num_tokens <= 0 || s.num_tokens > serving_.max_tokens_per_step || s.num_tokens > s.seq->num_pending()) {
       fail<InvalidArgument>("scheduler gave sequence {} {} tokens; it has {} pending and a step allows at most {}",
-                            s.seq->id, s.num_tokens, s.seq->num_pending(), config_.max_tokens_per_step);
+                            s.seq->id, s.num_tokens, s.seq->num_pending(), serving_.max_tokens_per_step);
     }
   }
 

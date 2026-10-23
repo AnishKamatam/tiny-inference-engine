@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "engine/scheduler.h"
+#include "engine/serving_config.h"
 #include "engine/sequence.h"
 #include "kv/paged_kv_cache.h"
 #include "model/qwen3.h"
@@ -15,7 +16,6 @@
 namespace tie {
 
 struct EngineConfig {
-  int32_t max_tokens_per_step = 512;
   std::vector<int32_t> stop_tokens;  // generation ends after emitting any of these
 };
 
@@ -32,7 +32,8 @@ using TokenCallback = std::function<void(int32_t seq_id, int32_t token)>;
 // engine builds the batch and its KV slots, runs the model and samples.
 class Engine {
  public:
-  Engine(Qwen3Model& model, PagedKVCache& cache, std::unique_ptr<Scheduler> scheduler, EngineConfig config);
+  Engine(Qwen3Model& model, PagedKVCache& cache, std::unique_ptr<Scheduler> scheduler, ServingConfig serving,
+         EngineConfig config = {});
 
   // Queues a request. Only a prompt that cannot run at all (no room for even one
   // generated token in the model context, the KV pool or a block-table row) is
@@ -62,6 +63,7 @@ class Engine {
   Qwen3Model& model_;
   PagedKVCache& cache_;
   std::unique_ptr<Scheduler> scheduler_;
+  ServingConfig serving_;
   EngineConfig config_;
   Sampler sampler_;
   TokenCallback on_token_;
