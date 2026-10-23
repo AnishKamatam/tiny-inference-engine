@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstdint>
-#include <deque>
 #include <vector>
 
 #include "engine/sequence.h"
@@ -37,28 +36,6 @@ class Scheduler {
   virtual void finish(Sequence* seq) = 0;                  // done or cancelled: forget it
   virtual bool has_work() const = 0;
   virtual int64_t num_preemptions() const { return 0; }
-};
-
-// One running sequence at a time, first come first served. Prefill is chunked
-// to max_tokens_per_step; decode is one token per step.
-class FcfsScheduler final : public Scheduler {
- public:
-  FcfsScheduler(PagedKVCache& cache, int32_t max_tokens_per_step);
-
-  void add(Sequence* seq) override { waiting_.push_back(seq); }
-  ScheduledBatch schedule() override;
-  void complete(const ScheduledBatch&) override { in_flight_ = false; }
-  void abandon(const ScheduledBatch&) override { in_flight_ = false; }
-  void finish(Sequence* seq) override;
-  bool has_work() const override { return running_ != nullptr || !waiting_.empty(); }
-
- private:
-  PagedKVCache& cache_;
-  int32_t max_tokens_per_step_;
-  std::deque<Sequence*> waiting_;
-  Sequence* running_ = nullptr;
-  bool in_flight_ = false;
-  uint64_t next_batch_id_ = 1;
 };
 
 }  // namespace tie

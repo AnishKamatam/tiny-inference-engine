@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "backend/cpu/cpu_backend.h"
+#include "engine/batch_scheduler.h"
 #include "engine/engine.h"
 #include "engine/serving_config.h"
 #include "kv/paged_kv_cache.h"
@@ -14,6 +15,14 @@
 namespace tie::test {
 
 using SchedulerFactory = std::function<std::unique_ptr<Scheduler>(PagedKVCache&)>;
+
+// The BatchScheduler config the tests use by default: first come first served, auto watermark.
+inline BatchSchedulerConfig fcfs(ServingConfig serving) {
+  BatchSchedulerConfig c;
+  c.serving = serving;
+  c.policy = OrderingPolicy::Fcfs;
+  return c;
+}
 
 // A model, its cache and an engine on the CPU, wired the way the CLI wires the real one.
 // KV blocks hold 4 tokens.
@@ -46,9 +55,8 @@ struct Rig {
 
     EngineConfig ec;
     ec.stop_tokens = std::move(stop_tokens);
-    std::unique_ptr<Scheduler> scheduler = make_scheduler
-                                               ? make_scheduler(*cache)
-                                               : std::make_unique<FcfsScheduler>(*cache, max_tokens_per_step);
+    std::unique_ptr<Scheduler> scheduler =
+        make_scheduler ? make_scheduler(*cache) : std::make_unique<BatchScheduler>(*cache, fcfs(serving));
     engine = std::make_unique<Engine>(*model, *cache, std::move(scheduler), serving, ec);
   }
 };

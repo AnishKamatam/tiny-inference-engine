@@ -26,7 +26,7 @@ using test::greedy;
 namespace {
 
 // Test-only: runs every queued sequence in one step, each with all its pending tokens
-// (or a fixed, possibly invalid, token count), which FcfsScheduler never does.
+// (or a fixed, possibly invalid, token count), which BatchScheduler never does.
 class AllAtOnceScheduler final : public Scheduler {
  public:
   AllAtOnceScheduler(PagedKVCache& cache, int32_t forced_num_tokens = -1, bool reserve = true, bool duplicate = false)
@@ -182,7 +182,7 @@ TEST_CASE("greedy generation on Metal starts exactly like HuggingFace") {
                    model_limits(serving, PagedKVCache::blocks_for(c.max_position_embeddings, kc.block_size)));
   EngineConfig ec;
   ec.stop_tokens = {151645, 151643};
-  Engine engine(model, cache, std::make_unique<FcfsScheduler>(cache, 64), serving, ec);
+  Engine engine(model, cache, std::make_unique<BatchScheduler>(cache, test::fcfs(ServingConfig{64, 1})), serving, ec);
 
   const std::vector<int32_t> got = engine.generate(prompt_ids, greedy(32));
   // "Three primary colors are" — half-precision prefill tiles may change a later near-tie.
@@ -221,7 +221,7 @@ TEST_CASE("a step whose forward fails rolls back its blocks and progress") {
   KVCacheConfig kc = rig.cache->config();
   kc.num_layers += 1;
   PagedKVCache wrong(rig.backend, kc);
-  Engine engine(*rig.model, wrong, std::make_unique<FcfsScheduler>(wrong, 64), ServingConfig{64, 1});
+  Engine engine(*rig.model, wrong, std::make_unique<BatchScheduler>(wrong, test::fcfs(ServingConfig{64, 1})), ServingConfig{64, 1});
   const int32_t free_before = wrong.num_free_blocks();
   const int32_t id = engine.add_request(prompt(10), greedy(3));
   CHECK_THROWS_AS(engine.step(), InvalidArgument);
@@ -264,7 +264,7 @@ TEST_CASE("generate cleans up its sequence when forward fails") {
   KVCacheConfig kc = rig.cache->config();
   kc.num_layers += 1;
   PagedKVCache wrong(rig.backend, kc);
-  Engine engine(*rig.model, wrong, std::make_unique<FcfsScheduler>(wrong, 64), ServingConfig{64, 1});
+  Engine engine(*rig.model, wrong, std::make_unique<BatchScheduler>(wrong, test::fcfs(ServingConfig{64, 1})), ServingConfig{64, 1});
   const int32_t total = wrong.num_free_blocks();
   CHECK_THROWS_AS(engine.generate(prompt(10), greedy(3)), InvalidArgument);
   CHECK_FALSE(engine.has_work());
@@ -275,7 +275,7 @@ TEST_CASE("generate cleans up its sequence when forward fails") {
 TEST_CASE("the engine rejects a serving config the model was not sized for") {
   Rig rig(test::make_tiny_model(1), 64);  // model sized for 64 tokens and 1 sequence per step
   const auto build = [&](ServingConfig serving) {
-    Engine engine(*rig.model, *rig.cache, std::make_unique<FcfsScheduler>(*rig.cache, serving.max_tokens_per_step), serving);
+    Engine engine(*rig.model, *rig.cache, std::make_unique<BatchScheduler>(*rig.cache, test::fcfs(ServingConfig{serving.max_tokens_per_step, 1})), serving);
   };
   CHECK_NOTHROW(build(ServingConfig{32, 1}));
   CHECK_THROWS_WITH_AS(build(ServingConfig{128, 1}), doctest::Contains("exceeds the model"), InvalidArgument);
@@ -300,7 +300,7 @@ TEST_CASE("a forward failure abandons the batch so the scheduler offers it again
   KVCacheConfig kc = rig.cache->config();
   kc.num_layers += 1;
   PagedKVCache wrong(rig.backend, kc);
-  Engine engine(*rig.model, wrong, std::make_unique<FcfsScheduler>(wrong, 64), ServingConfig{64, 1});
+  Engine engine(*rig.model, wrong, std::make_unique<BatchScheduler>(wrong, test::fcfs(ServingConfig{64, 1})), ServingConfig{64, 1});
   engine.add_request(prompt(10), greedy(3));
   CHECK_THROWS_AS(engine.step(), InvalidArgument);
   CHECK_THROWS_AS(engine.step(), InvalidArgument);  // rescheduled, not silently dropped

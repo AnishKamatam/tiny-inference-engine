@@ -11,6 +11,7 @@
 #include "backend/metal/metal_backend.h"
 #include "cli/args.h"
 #include "core/error.h"
+#include "engine/batch_scheduler.h"
 #include "engine/engine.h"
 #include "kv/paged_kv_cache.h"
 #include "model/loader.h"
@@ -62,7 +63,9 @@ int run_generate(const tie::GenerateOptions& opt) {
   const ServingConfig serving;
   Qwen3Model model(backend, weights,
                    model_limits(serving, PagedKVCache::blocks_for(config.max_position_embeddings, kv.block_size)));
-  Engine engine(model, cache, std::make_unique<FcfsScheduler>(cache, serving.max_tokens_per_step), serving, engine_config);
+  BatchSchedulerConfig scheduling;
+  scheduling.serving = serving;
+  Engine engine(model, cache, std::make_unique<BatchScheduler>(cache, scheduling), serving, engine_config);
   const double load_seconds = seconds_since(load_start);
 
   const std::string text =
