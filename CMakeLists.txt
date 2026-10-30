@@ -87,7 +87,7 @@ set_source_files_properties(${TIE_METAL_EMBED} PROPERTIES COMPILE_OPTIONS "-w")
 add_dependencies(tie_core tie_embed_metal)
 target_link_libraries(tie_core PUBLIC nlohmann_json::nlohmann_json "-framework CoreFoundation" "-framework Metal" "-framework Foundation")
 
-add_library(tie_cli STATIC src/cli/args.cpp)
+add_library(tie_cli STATIC src/bench/report.cpp src/bench/workload.cpp src/cli/args.cpp)
 target_compile_options(tie_cli PRIVATE ${TIE_WARNINGS} ${TIE_ARCH})
 target_link_libraries(tie_cli PUBLIC tie_core)
 
@@ -99,6 +99,7 @@ enable_testing()
 add_executable(tie_tests
   tests/test_main.cpp
   tests/backend/test_cpu_ops.cpp
+  tests/bench/test_bench.cpp
   tests/backend/test_paged_attention.cpp
   tests/backend/test_matmul.cpp
   tests/backend/test_metal_attention.cpp
